@@ -1,0 +1,18 @@
+# Telegram
+python-telegram-bot==20.6
+telethon==1.28.5
+
+# Database
+sqlalchemy==2.0.20
+alembic==1.11.3
+
+# LLM & AI
+crewai==0.8.0
+langchain==0.0.235
+openai==0.28.0
+
+# Utilities
+python-dotenv==1.0.0
+schedule==1.2.0
+apscheduler==3.10.1
+loguru==0.7.0
