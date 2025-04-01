@@ -144,7 +144,7 @@ class DatabaseManager:
         finally:
             session.close()
 
-    def save_digest(self, date, text, sections):
+    def save_digest(self, date, text, sections, digest_type="brief"):
         """
         Сохранение дайджеста с секциями
         
@@ -152,6 +152,7 @@ class DatabaseManager:
             date (datetime): Дата дайджеста
             text (str): Полный текст дайджеста
             sections (dict): Словарь секций {категория: текст}
+            digest_type (str): Тип дайджеста: "brief" (краткий) или "detailed" (подробный)
             
         Returns:
             Digest: Созданный дайджест
@@ -159,7 +160,7 @@ class DatabaseManager:
         session = self.Session()
         try:
             # Создаем запись дайджеста
-            digest = Digest(date=date, text=text)
+            digest = Digest(date=date, text=text, digest_type=digest_type)
             session.add(digest)
             session.flush()  # Чтобы получить ID дайджеста
             
@@ -173,7 +174,7 @@ class DatabaseManager:
                 session.add(section)
             
             session.commit()
-            logger.info(f"Сохранен дайджест за {date.strftime('%Y-%m-%d')}")
+            logger.info(f"Сохранен дайджест типа '{digest_type}' за {date.strftime('%Y-%m-%d')}")
             return digest
         except Exception as e:
             session.rollback()
@@ -181,25 +182,100 @@ class DatabaseManager:
             raise
         finally:
             session.close()
-
-    def get_latest_digest(self):
+    def get_recently_categorized_messages(self, limit=20):
+        """
+        Получение последних сообщений с категориями
+        
+        Args:
+            limit (int): Максимальное количество сообщений
+            
+        Returns:
+            list: Список объектов Message
+        """
+        session = self.Session()
+        try:
+            messages = session.query(Message)\
+                .filter(Message.category != None)\
+                .order_by(Message.id.desc())\
+                .limit(limit)\
+                .all()
+            return messages
+        except Exception as e:
+            logger.error(f"Ошибка при получении недавно категоризированных сообщений: {str(e)}")
+            return []
+        finally:
+            session.close()
+    def get_message_by_id(self, message_id):
+        """
+        Получение сообщения по ID
+        
+        Args:
+            message_id (int): ID сообщения
+            
+        Returns:
+            Message: Объект сообщения или None
+        """
+        session = self.Session()
+        try:
+            message = session.query(Message).filter_by(id=message_id).first()
+            return message
+        except Exception as e:
+            logger.error(f"Ошибка при получении сообщения по ID: {str(e)}")
+            return None
+        finally:
+            session.close()
+    def get_latest_digest(self, digest_type=None):
         """
         Получение последнего дайджеста
         
+        Args:
+            digest_type (str, optional): Тип дайджеста ("brief", "detailed")
+            
         Returns:
             Digest: Объект последнего дайджеста
         """
         session = self.Session()
         try:
-            digest = session.query(Digest).order_by(Digest.date.desc()).first()
+            query = session.query(Digest).order_by(Digest.date.desc())
+            
+            if digest_type:
+                query = query.filter(Digest.digest_type == digest_type)
+                
+            digest = query.first()
             return digest
         except Exception as e:
             logger.error(f"Ошибка при получении последнего дайджеста: {str(e)}")
             return None
         finally:
             session.close()
+                   
+def get_message_by_channel_and_id(self, channel, message_id):
+        """
+        Получение сообщения по названию канала и ID сообщения в этом канале
+        
+        Args:
+            channel (str): Название канала
+            message_id (int): ID сообщения в канале
+            
+        Returns:
+            Message: Объект сообщения или None
+        """
+        session = self.Session()
+        try:
+            message = session.query(Message).filter_by(
+                channel=channel, 
+                message_id=message_id
+            ).first()
+            return message
+        except Exception as e:
+            logger.error(f"Ошибка при получении сообщения по каналу и ID: {str(e)}")
+            return None
+        finally:
+            session.close()                 
 
-    def get_digest_by_date(self, date):
+
+
+def get_digest_by_date(self, date):
         """
         Получение дайджеста по дате
         
@@ -225,47 +301,5 @@ class DatabaseManager:
             logger.error(f"Ошибка при получении дайджеста по дате: {str(e)}")
             return None
         finally:
-            session.close()
-    def get_message_by_id(self, message_id):
-        """
-        Получение сообщения по ID
-        
-        Args:
-            message_id (int): ID сообщения
-            
-        Returns:
-            Message: Объект сообщения или None
-        """
-        session = self.Session()
-        try:
-            message = session.query(Message).filter_by(id=message_id).first()
-            return message
-        except Exception as e:
-            logger.error(f"Ошибка при получении сообщения по ID: {str(e)}")
-            return None
-        finally:
-            session.close()
-
-    def get_recently_categorized_messages(self, limit=20):
-        """
-        Получение последних сообщений с категориями
-        
-        Args:
-            limit (int): Максимальное количество сообщений
-            
-        Returns:
-            list: Список объектов Message
-        """
-        session = self.Session()
-        try:
-            messages = session.query(Message)\
-                .filter(Message.category != None)\
-                .order_by(Message.id.desc())\
-                .limit(limit)\
-                .all()
-            return messages
-        except Exception as e:
-            logger.error(f"Ошибка при получении недавно категоризированных сообщений: {str(e)}")
-            return []
-        finally:
-            session.close()        
+            session.close()  
+                       

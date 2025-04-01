@@ -97,7 +97,7 @@ async def analyze_messages(db_manager, llm_model, limit=10):
             
             print("    Отправка запроса к модели классификации...")
             category = llm_model.classify(prompt, categories)
-            print(f"    Определена категория: {category}")
+            print(f"    Опyределена категория: {category}")
             
             # Обновляем категорию в БД
             success = db_manager.update_message_category(message.id, category)

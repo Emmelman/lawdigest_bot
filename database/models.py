@@ -31,10 +31,11 @@ class Digest(Base):
     id = Column(Integer, primary_key=True)
     date = Column(DateTime, nullable=False)
     text = Column(Text, nullable=False)
+    digest_type = Column(String(20), nullable=False, default="brief")  # Тип дайджеста (brief/detailed)
     created_at = Column(DateTime, default=datetime.now)
     
     def __repr__(self):
-        return f"<Digest(id={self.id}, date='{self.date}')>"
+        return f"<Digest(id={self.id}, date='{self.date}', type='{self.digest_type}')>"
 
 
 class DigestSection(Base):

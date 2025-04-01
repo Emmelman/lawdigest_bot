@@ -1,5 +1,5 @@
 """
-Настройки проекта
+Обновление настроек проекта
 """
 import os
 from dotenv import load_dotenv
@@ -11,12 +11,15 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID")
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "your_bot_username")  # Имя бота для ссылок
 
 # Список каналов для мониторинга
 TELEGRAM_CHANNELS = [
     "@dumainfo",     # Государственная Дума
     "@sovfedinfo",   # Совет Федерации
-    "@vsrf_ru"       # Верховный суд РФ
+    "@vsrf_ru",      # Верховный суд РФ
+    "@kremlininfo",  # Президент РФ
+    "@governmentru"  # Правительство РФ
 ]
 
 # Настройки БД
