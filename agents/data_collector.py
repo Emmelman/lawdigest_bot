@@ -174,9 +174,13 @@ class DataCollectorAgent:
         
         return new_messages_count
     
-    async def _collect_all_channels(self, days_back=1):
+    """
+    Оптимизированный метод для параллельного сбора данных из каналов
+    """
+
+    async def _collect_all_channels_parallel(self, days_back=1):
         """
-        Сбор данных со всех каналов
+        Параллельный сбор данных со всех каналов
         
         Args:
             days_back (int): За сколько дней назад собирать сообщения
@@ -184,22 +188,33 @@ class DataCollectorAgent:
         Returns:
             dict: Словарь с результатами {канал: количество новых сообщений}
         """
+        await self._init_client()
         results = {}
         
+        # Создаем задачи для всех каналов
+        tasks = []
         for channel in TELEGRAM_CHANNELS:
-            try:
-                count = await self._process_channel(channel, days_back=days_back)
-                results[channel] = count
-                logger.info(f"Собрано {count} новых сообщений из канала {channel}")
-            except Exception as e:
-                logger.error(f"Ошибка при обработке канала {channel}: {str(e)}")
+            task = self._process_channel(channel, days_back=days_back)
+            tasks.append(task)
+        
+        # Запускаем все задачи параллельно
+        channel_results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Обрабатываем результаты
+        for i, channel in enumerate(TELEGRAM_CHANNELS):
+            result = channel_results[i]
+            if isinstance(result, Exception):
+                logger.error(f"Ошибка при обработке канала {channel}: {str(result)}")
                 results[channel] = 0
+            else:
+                results[channel] = result
+                logger.info(f"Собрано {result} новых сообщений из канала {channel}")
         
         return results
-    
+
     def collect_data(self, days_back=1):
         """
-        Инструмент для сбора данных из каналов
+        Инструмент для сбора данных из каналов с параллельной обработкой
         
         Args:
             days_back (int): За сколько дней назад собирать данные
@@ -207,10 +222,10 @@ class DataCollectorAgent:
         Returns:
             dict: Результаты сбора данных
         """
-        logger.info(f"Запуск сбора данных из каналов за последние {days_back} дней: {', '.join(TELEGRAM_CHANNELS)}")
+        logger.info(f"Запуск параллельного сбора данных из каналов за последние {days_back} дней: {', '.join(TELEGRAM_CHANNELS)}")
         
         loop = asyncio.get_event_loop()
-        results = loop.run_until_complete(self._collect_all_channels(days_back=days_back))
+        results = loop.run_until_complete(self._collect_all_channels_parallel(days_back=days_back))
         
         total_messages = sum(results.values())
         logger.info(f"Сбор данных завершен. Всего собрано {total_messages} новых сообщений")
@@ -220,6 +235,8 @@ class DataCollectorAgent:
             "total_new_messages": total_messages,
             "channels_stats": results
         }
+    
+    
     
     def create_task(self):
         """

@@ -42,10 +42,144 @@ class DigesterAgent:
             verbose=True,
             tools=[create_digest_tool]
         )
-    
+    def _extract_title_for_url(self, text, url):
+        """
+        Улучшенный метод извлечения заголовка для URL
+        
+        Args:
+            text (str): Полный текст сообщения
+            url (str): URL для которого нужно найти заголовок
+            
+        Returns:
+            str: Извлеченный заголовок
+        """
+        # Разделим текст на части до и после URL
+        parts = text.split(url)
+        
+        if len(parts) < 2:
+            return url[:50] + "..." if len(url) > 50 else url
+        
+        before_url = parts[0]
+        after_url = parts[1]
+        
+        # Ищем заголовок перед URL
+        # Разбиваем текст на абзацы и берем последний перед URL
+        before_paragraphs = before_url.split('\n\n')
+        last_paragraph = before_paragraphs[-1] if before_paragraphs else ""
+        
+        # Для улучшения точности можно разбить на предложения
+        sentences = last_paragraph.split('.')
+        
+        # Берем последнее предложение, которое обычно содержит заголовок
+        candidate_title = sentences[-1].strip() if sentences else last_paragraph.strip()
+        
+        # Если заголовок слишком короткий или его нет, ищем в тексте после URL
+        if len(candidate_title) < 15:
+            after_paragraphs = after_url.split('\n\n')
+            first_paragraph = after_paragraphs[0] if after_paragraphs else ""
+            sentences = first_paragraph.split('.')
+            candidate_title = sentences[0].strip() if sentences else first_paragraph.strip()
+        
+        # Окончательная проверка заголовка
+        if len(candidate_title) < 10:
+            # Если все еще нет подходящего заголовка, используем название домена из URL
+            from urllib.parse import urlparse
+            domain = urlparse(url).netloc
+            return f"Ссылка на {domain}"
+        
+        # Очищаем заголовок от лишних символов
+        candidate_title = candidate_title.replace("\n", " ").strip()
+        
+        # Восстановление обрезанных слов в начале 
+        # (как в примере "[ная Дума (VK)" -> "Государственная Дума (VK)")
+        if candidate_title.startswith("[") and "]" not in candidate_title[:15]:
+            # Ищем полное слово в тексте
+            words = candidate_title.split()
+            if words and words[0].startswith("["):
+                first_word = words[0][1:]  # Удаляем открывающую скобку
+                
+                # Ищем полное слово в тексте
+                possible_words = [word for word in text.split() 
+                                if word.endswith(first_word) or first_word in word]
+                
+                if possible_words:
+                    # Берем самое длинное подходящее слово
+                    full_word = max(possible_words, key=len)
+                    candidate_title = candidate_title.replace(words[0], "[" + full_word)
+        
+        return candidate_title
+    def _add_category_icon(self, category):
+        """
+        Добавляет иконку в зависимости от категории
+        
+        Args:
+            category (str): Название категории
+            
+        Returns:
+            str: Иконка для категории
+        """
+        icons = {
+            'законодательные инициативы': '📝',
+            'новая судебная практика': '⚖️',
+            'новые законы': '📜',
+            'поправки к законам': '✏️',
+            'другое': '📌'
+        }
+        return icons.get(category, '•')
+
+    def _clean_text_with_links(self, text):
+        """
+        Очищает текст от дублирующихся ссылок и нормализует форматирование
+        
+        Args:
+            text (str): Исходный текст с ссылками
+            
+        Returns:
+            str: Очищенный текст
+        """
+        # Находим все URL в тексте
+        url_pattern = r'https?://[^\s\)\]\>]+'
+        urls = re.findall(url_pattern, text)
+        
+        # Удаляем дубликаты URL, сохраняя первое вхождение каждого URL
+        for url in set(urls):
+            if urls.count(url) > 1:
+                # Находим все позиции этого URL
+                positions = [text.find(url, pos) for pos in range(len(text)) 
+                            if text.find(url, pos) != -1]
+                
+                # Сохраняем только первое вхождение
+                for pos in positions[1:]:
+                    end_pos = pos + len(url)
+                    # Проверяем, не является ли это частью markdown ссылки
+                    if (pos > 0 and text[pos-1] == '(' and end_pos < len(text) and text[end_pos] == ')'):
+                        # Находим открывающую скобку перед URL
+                        bracket_pos = text.rfind('[', 0, pos)
+                        if bracket_pos != -1:
+                            # Это часть markdown ссылки, не удаляем
+                            continue
+                    
+                    # Удаляем URL
+                    text = text[:pos] + text[end_pos:]
+                    # Корректируем позиции остальных вхождений
+                    positions = [p - len(url) if p > pos else p for p in positions]
+        
+        # Заменяем обычные URL на markdown ссылки, если они не являются частью markdown
+        for url in set(urls):
+            # Проверяем, не является ли URL частью markdown ссылки
+            markdown_pattern = r'\[(.*?)\]\(' + re.escape(url) + r'\)'
+            if not re.search(markdown_pattern, text):
+                # Заменяем URL на markdown ссылку с тем же URL в качестве текста
+                short_url = url.replace('https://', '').replace('http://', '')
+                if len(short_url) > 30:
+                    short_url = short_url[:30] + "..."
+                new_link = f"[{short_url}]({url})"
+                text = text.replace(url, new_link)
+        
+        return text
     def _extract_links_and_headlines(self, text):
         """
-        Извлечение ссылок и заголовков из текста сообщения
+        Улучшенное извлечение ссылок и заголовков из текста сообщения
         
         Args:
             text (str): Текст сообщения
@@ -60,13 +194,16 @@ class DigesterAgent:
         markdown_links = re.findall(markdown_pattern, text)
         
         for title, url in markdown_links:
-            results.append({
-                "title": title.strip(),
-                "url": url.strip()
-            })
+            # Удостоверимся, что заголовок не пустой и содержательный
+            if title and len(title.strip()) > 3:
+                results.append({
+                    "title": title.strip(),
+                    "url": url.strip(),
+                    "is_markdown": True
+                })
         
         # Шаблон для поиска обычных URL
-        url_pattern = r'https?://[^\s]+'
+        url_pattern = r'https?://[^\s\)\]\>]+'
         
         # Находим URL, которые не были найдены в markdown формате
         all_urls = re.findall(url_pattern, text)
@@ -74,26 +211,13 @@ class DigesterAgent:
         
         for url in all_urls:
             if url not in markdown_urls and url.strip():
-                # Пытаемся найти текст, связанный с этой ссылкой
-                # (например, текст в строке перед URL или после URL)
-                context = text.split(url)
-                
-                if len(context) > 1:
-                    # Берем 100 символов до и после URL
-                    before = context[0][-100:] if len(context[0]) > 100 else context[0]
-                    after = context[1][:100] if len(context[1]) > 100 else context[1]
-                    
-                    # Ищем возможный заголовок в тексте до или после URL
-                    possible_title = before.strip() if before.strip() else after.strip()
-                    
-                    # Ограничиваем длину заголовка до 100 символов
-                    title = possible_title[:100] + "..." if len(possible_title) > 100 else possible_title
-                else:
-                    title = url[:50] + "..." if len(url) > 50 else url
+                # Извлекаем контекст для этого URL
+                title = self._extract_title_for_url(text, url)
                 
                 results.append({
-                    "title": title.strip(),
-                    "url": url.strip()
+                    "title": title,
+                    "url": url.strip(),
+                    "is_markdown": False
                 })
         
         return results
@@ -122,29 +246,34 @@ class DigesterAgent:
             for link in links:
                 link["channel"] = msg.channel
                 link["date"] = msg.date
+                link["message_id"] = msg.id
                 all_links.append(link)
         
-        # Если нет ссылок в сообщениях, генерируем их из текста
+        # Если нет ссылок в сообщениях, генерируем их из текста сообщений
         if not all_links:
-            for idx, msg in enumerate(messages[:10]):  # Ограничиваем до 10 сообщений
+            for msg in messages[:10]:  # Ограничиваем до 10 сообщений
                 # Создаем ссылку на сообщение в боте
                 bot_link = f"https://t.me/{BOT_USERNAME}?start=msg_{msg.id}"
                 
-                # Берем первые 100 символов текста как заголовок
-                title = msg.text[:100].strip() + "..." if len(msg.text) > 100 else msg.text.strip()
+                # Получаем первые 100 символов как заголовок, удаляем переносы строк
+                title = msg.text[:100].replace('\n', ' ').strip()
+                title = title + "..." if len(msg.text) > 100 else title
                 
                 all_links.append({
                     "title": title,
                     "url": bot_link,
                     "channel": msg.channel,
-                    "date": msg.date
+                    "date": msg.date,
+                    "message_id": msg.id,
+                    "is_markdown": False
                 })
         
         # Сортируем ссылки по дате (сначала самые новые)
         all_links.sort(key=lambda x: x["date"], reverse=True)
         
         # Формируем текст секции
-        section_text = f"## {category.upper()}\n\n"
+        category_icon = self._add_category_icon(category)
+        section_text = f"## {category_icon} {category.upper()}\n\n"
         
         # Добавляем краткое описание категории
         category_descriptions = {
@@ -164,7 +293,13 @@ class DigesterAgent:
             formatted_date = link["date"].strftime("%d.%m.%Y")
             channel_name = link["channel"].replace("@", "")
             
-            section_text += f"{idx+1}. [{link['title']}]({link['url']}) - {channel_name}, {formatted_date}\n\n"
+            # Проверяем и исправляем заголовок
+            title = link["title"]
+            if title.startswith("[") and not title.endswith("]") and "]" not in title[:15]:
+                # Ищем полное слово
+                title = self._extract_title_for_url(messages[0].text, link["url"])
+            
+            section_text += f"{idx+1}. [{title}]({link['url']}) - {channel_name}, {formatted_date}\n\n"
         
         # Добавляем ссылку на полный обзор
         section_text += f"\n[Открыть полный обзор по категории '{category}'](/category/{category})\n"
@@ -185,11 +320,20 @@ class DigesterAgent:
         if not messages:
             return f"За данный период новостей по категории '{category}' не обнаружено."
         
-        # Формируем контекст из сообщений для LLM
-        messages_text = "\n\n---\n\n".join([
-            f"Канал: {msg.channel}\nДата: {msg.date.strftime('%d.%m.%Y')}\n\n{msg.text}" 
-            for msg in messages[:15]  # Ограничиваем до 15 сообщений для контекста
-        ])
+        # Добавляем иконку к названию категории
+        category_icon = self._add_category_icon(category)
+        category_display = f"{category_icon} {category}"
+        
+        # Очищаем и нормализуем тексты сообщений
+        cleaned_messages = []
+        for msg in messages[:15]:  # Ограничиваем до 15 сообщений для контекста
+            cleaned_text = self._clean_text_with_links(msg.text)
+            cleaned_messages.append(
+                f"Канал: {msg.channel}\nДата: {msg.date.strftime('%d.%m.%Y')}\n\n{cleaned_text}"
+            )
+        
+        # Формируем контекст из очищенных сообщений для LLM
+        messages_text = "\n\n---\n\n".join(cleaned_messages)
         
         prompt = f"""
         Сформируй подробный дайджест по категории '{category}' на основе следующих сообщений из правительственных Telegram-каналов.
@@ -205,13 +349,16 @@ class DigesterAgent:
         5. Используй профессиональный юридический язык, но понятный широкой аудитории.
         6. Выделяй полужирным шрифтом (через **) ключевые термины, названия законов и важные даты.
         7. При упоминании законопроектов указывай их текущий статус рассмотрения.
-        8. Сохрани и интегрируй все важные URL-ссылки из оригинальных сообщений.
-        9. Объем: 3-5 содержательных абзацев.
+        8. ВАЖНО: сохрани все markdown-ссылки в формате [текст](ссылка). НЕ ДУБЛИРУЙ ссылки в простом текстовом виде.
+        9. Для отдельных разделов или важных пунктов используй символы/эмодзи в начале строки (📝, ⚖️, 📜, ✏️ и т.д.)
+        10. Объем: 3-5 содержательных абзацев.
         """
         
         try:
             response = self.llm_model.generate(prompt, max_tokens=1000)
-            return response
+            # Дополнительная очистка результата от возможных дублирующихся ссылок
+            cleaned_response = self._clean_text_with_links(response)
+            return cleaned_response
         except Exception as e:
             logger.error(f"Ошибка при генерации подробного обзора по категории '{category}': {str(e)}")
             return f"За данный период подробная информация по категории '{category}' недоступна из-за технической ошибки."
@@ -317,74 +464,86 @@ class DigesterAgent:
         
         # Формируем краткий дайджест, если запрошено
         if digest_type in ["brief", "both"]:
-            # Генерируем вводную часть
-            intro_text = self._generate_digest_intro(end_date, total_messages, categories_count, is_brief=True)
-            
-            # Формируем полный текст краткого дайджеста
-            brief_text = f"{intro_text}\n\n"
-            
-            for category in CATEGORIES:
-                if category in brief_sections:
-                    brief_text += f"{brief_sections[category]}\n\n"
-            
-            # Добавляем категорию "другое" в конец, если есть сообщения
-            if "другое" in brief_sections:
-                brief_text += f"{brief_sections['другое']}\n\n"
-            
-            # Добавляем ссылку на подробный дайджест, если генерируются оба
-            if digest_type == "both":
-                brief_text += "\n\n[Просмотреть подробный дайджест](/digest/detailed)\n"
-            
-            results["brief_digest_text"] = brief_text
-            
-            # Сохраняем краткий дайджест в БД
             try:
-                brief_digest = self.db_manager.save_digest(
-                    end_date, 
-                    brief_text, 
-                    brief_sections,
-                    digest_type="brief"
-                )
-                results["brief_digest_id"] = brief_digest.id
-                logger.info(f"Краткий дайджест успешно создан и сохранен (ID: {brief_digest.id})")
+                # Генерируем вводную часть
+                intro_text = self._generate_digest_intro(end_date, total_messages, categories_count, is_brief=True)
+                
+                # Формируем полный текст краткого дайджеста
+                brief_text = f"{intro_text}\n\n"
+                
+                # Сначала добавляем категории с сообщениями в порядке значимости
+                for category in CATEGORIES:
+                    if category in brief_sections:
+                        brief_text += f"{brief_sections[category]}\n\n"
+                
+                # Добавляем категорию "другое" в конец, если есть сообщения
+                if "другое" in brief_sections:
+                    brief_text += f"{brief_sections['другое']}\n\n"
+                
+                # Добавляем ссылку на подробный дайджест, если генерируются оба
+                if digest_type == "both":
+                    brief_text += "\n\n[Просмотреть подробный дайджест](/digest/detailed)\n"
+                
+                results["brief_digest_text"] = brief_text
+                
+                # Сохраняем краткий дайджест в БД
+                try:
+                    brief_result = self.db_manager.save_digest(
+                        end_date, 
+                        brief_text, 
+                        brief_sections,
+                        digest_type="brief"
+                    )
+                    results["brief_digest_id"] = brief_result["id"]
+                    logger.info(f"Краткий дайджест успешно создан и сохранен (ID: {brief_result['id']})")
+                except Exception as e:
+                    logger.error(f"Ошибка при сохранении краткого дайджеста: {str(e)}")
+                    results["brief_error"] = str(e)
             except Exception as e:
-                logger.error(f"Ошибка при сохранении краткого дайджеста: {str(e)}")
+                logger.error(f"Ошибка при создании краткого дайджеста: {str(e)}")
                 results["brief_error"] = str(e)
         
         # Формируем подробный дайджест, если запрошено
         if digest_type in ["detailed", "both"]:
-            # Генерируем вводную часть
-            intro_text = self._generate_digest_intro(end_date, total_messages, categories_count, is_brief=False)
-            
-            # Формируем полный текст подробного дайджеста
-            detailed_text = f"{intro_text}\n\n"
-            
-            for category in CATEGORIES:
-                if category in detailed_sections:
-                    detailed_text += f"## {category.upper()}\n\n{detailed_sections[category]}\n\n"
-            
-            # Добавляем категорию "другое" в конец, если есть сообщения
-            if "другое" in detailed_sections:
-                detailed_text += f"## ДРУГИЕ НОВОСТИ\n\n{detailed_sections['другое']}\n\n"
-            
-            # Добавляем ссылку на краткий дайджест, если генерируются оба
-            if digest_type == "both":
-                detailed_text += "\n\n[Просмотреть краткий дайджест](/digest/brief)\n"
-            
-            results["detailed_digest_text"] = detailed_text
-            
-            # Сохраняем подробный дайджест в БД
             try:
-                detailed_digest = self.db_manager.save_digest(
-                    end_date, 
-                    detailed_text, 
-                    detailed_sections,
-                    digest_type="detailed"
-                )
-                results["detailed_digest_id"] = detailed_digest.id
-                logger.info(f"Подробный дайджест успешно создан и сохранен (ID: {detailed_digest.id})")
+                # Генерируем вводную часть
+                intro_text = self._generate_digest_intro(end_date, total_messages, categories_count, is_brief=False)
+                
+                # Формируем полный текст подробного дайджеста
+                detailed_text = f"{intro_text}\n\n"
+                
+                # Сначала добавляем категории с сообщениями в порядке значимости
+                for category in CATEGORIES:
+                    if category in detailed_sections:
+                        category_icon = self._add_category_icon(category)
+                        detailed_text += f"## {category_icon} {category.upper()}\n\n{detailed_sections[category]}\n\n"
+                
+                # Добавляем категорию "другое" в конец, если есть сообщения
+                if "другое" in detailed_sections:
+                    category_icon = self._add_category_icon("другое")
+                    detailed_text += f"## {category_icon} ДРУГИЕ НОВОСТИ\n\n{detailed_sections['другое']}\n\n"
+                
+                # Добавляем ссылку на краткий дайджест, если генерируются оба
+                if digest_type == "both":
+                    detailed_text += "\n\n[Просмотреть краткий дайджест](/digest/brief)\n"
+                
+                results["detailed_digest_text"] = detailed_text
+                
+                # Сохраняем подробный дайджест в БД
+                try:
+                    detailed_result = self.db_manager.save_digest(
+                        end_date, 
+                        detailed_text, 
+                        detailed_sections,
+                        digest_type="detailed"
+                    )
+                    results["detailed_digest_id"] = detailed_result["id"]
+                    logger.info(f"Подробный дайджест успешно создан и сохранен (ID: {detailed_result['id']})")
+                except Exception as e:
+                    logger.error(f"Ошибка при сохранении подробного дайджеста: {str(e)}")
+                    results["detailed_error"] = str(e)
             except Exception as e:
-                logger.error(f"Ошибка при сохранении подробного дайджеста: {str(e)}")
+                logger.error(f"Ошибка при создании подробного дайджеста: {str(e)}")
                 results["detailed_error"] = str(e)
         
         return results

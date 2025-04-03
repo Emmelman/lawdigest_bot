@@ -79,44 +79,48 @@ class TelegramBot:
     async def digest_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /digest - краткий дайджест"""
         # Получаем последний краткий дайджест
-        digest = self.db_manager.get_latest_digest(digest_type="brief")
+        digest = self.db_manager.get_latest_digest_with_sections(digest_type="brief")
         
         if not digest:
             # Если краткого нет, пробуем получить любой
-            digest = self.db_manager.get_latest_digest()
+            digest = self.db_manager.get_latest_digest_with_sections()
         
         if not digest:
             await update.message.reply_text("К сожалению, дайджест еще не сформирован.")
             return
         
         # Отправляем дайджест по частям, так как Telegram ограничивает длину сообщения
-        chunks = self._split_text(digest.text)
+        chunks = self._split_text(digest["text"])
         
         for i, chunk in enumerate(chunks):
             if i == 0:
-                await update.message.reply_text(f"Дайджест за {digest.date.strftime('%d.%m.%Y')} (краткая версия):\n\n{chunk}")
+                await update.message.reply_text(
+                    f"Дайджест за {digest['date'].strftime('%d.%m.%Y')} (краткая версия):\n\n{chunk}"
+                )
             else:
                 await update.message.reply_text(chunk)
-    
+
     async def digest_detailed_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /digest_detailed - подробный дайджест"""
         # Получаем последний подробный дайджест
-        digest = self.db_manager.get_latest_digest(digest_type="detailed")
+        digest = self.db_manager.get_latest_digest_with_sections(digest_type="detailed")
         
         if not digest:
             # Если подробного нет, пробуем получить любой
-            digest = self.db_manager.get_latest_digest()
+            digest = self.db_manager.get_latest_digest_with_sections()
         
         if not digest:
             await update.message.reply_text("К сожалению, подробный дайджест еще не сформирован.")
             return
         
         # Отправляем дайджест по частям, так как Telegram ограничивает длину сообщения
-        chunks = self._split_text(digest.text)
+        chunks = self._split_text(digest["text"])
         
         for i, chunk in enumerate(chunks):
             if i == 0:
-                await update.message.reply_text(f"Дайджест за {digest.date.strftime('%d.%m.%Y')} (подробная версия):\n\n{chunk}")
+                await update.message.reply_text(
+                    f"Дайджест за {digest['date'].strftime('%d.%m.%Y')} (подробная версия):\n\n{chunk}"
+                )
             else:
                 await update.message.reply_text(chunk)
     
@@ -156,38 +160,40 @@ class TelegramBot:
             if len(parts) == 3:
                 digest_type = parts[1]  # brief или detailed
                 category = parts[2]     # название категории
-                
-                # Получаем последний дайджест нужного типа
-                digest = self.db_manager.get_latest_digest(digest_type=digest_type)
-                
-                if not digest:
-                    # Если дайджеста такого типа нет, берем любой
-                    digest = self.db_manager.get_latest_digest()
-                
-                if not digest:
-                    await query.message.reply_text(f"К сожалению, дайджест еще не сформирован.")
-                    return
-                
-                # Ищем соответствующую секцию в дайджесте
-                section = next(
-                    (s for s in digest.sections if s.category == category), 
-                    None
+            
+            # Получаем последний дайджест нужного типа
+            digest = self.db_manager.get_latest_digest_with_sections(digest_type=digest_type)
+            
+            if not digest:
+                # Если дайджеста такого типа нет, берем любой
+                digest = self.db_manager.get_latest_digest_with_sections()
+            
+            if not digest:
+                await query.message.reply_text(f"К сожалению, дайджест еще не сформирован.")
+                return
+            
+            # Ищем соответствующую секцию в дайджесте
+            section = next(
+                (s for s in digest["sections"] if s["category"] == category), 
+                None
+            )
+            
+            if not section:
+                await query.message.reply_text(
+                    f"Информация по категории '{category}' отсутствует в последнем дайджесте."
                 )
-                
-                if not section:
-                    await query.message.reply_text(f"Информация по категории '{category}' отсутствует в последнем дайджесте.")
-                    return
-                
-                # Подготавливаем текст для ответа
-                digest_type_name = "Краткий обзор" if digest_type == "brief" else "Подробный обзор"
-                header = f"Дайджест за {digest.date.strftime('%d.%m.%Y')}\n{digest_type_name} категории: {category}\n\n"
-                
-                # Отправляем секцию (возможно, разбитую на части)
-                full_text = header + section.text
-                chunks = self._split_text(full_text)
-                
-                for chunk in chunks:
-                    await query.message.reply_text(chunk)
+                return
+            
+            # Подготавливаем текст для ответа
+            digest_type_name = "Краткий обзор" if digest_type == "brief" else "Подробный обзор"
+            header = f"Дайджест за {digest['date'].strftime('%d.%m.%Y')}\n{digest_type_name} категории: {category}\n\n"
+            
+            # Отправляем секцию (возможно, разбитую на части)
+            full_text = header + section["text"]
+            chunks = self._split_text(full_text)
+            
+            for chunk in chunks:
+                await query.message.reply_text(chunk)
     
     async def message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик текстовых сообщений"""
@@ -250,7 +256,7 @@ class TelegramBot:
             target_date = datetime(year, month, day)
             
             # Получаем дайджест по дате
-            digest = self.db_manager.get_digest_by_date(target_date)
+            digest = self.db_manager.get_digest_by_date_with_sections(target_date)
             
             if not digest:
                 await update.message.reply_text(
@@ -259,11 +265,13 @@ class TelegramBot:
                 return
             
             # Отправляем дайджест по частям
-            chunks = self._split_text(digest.text)
+            chunks = self._split_text(digest["text"])
             
             for i, chunk in enumerate(chunks):
                 if i == 0:
-                    await update.message.reply_text(f"Дайджест за {digest.date.strftime('%d.%m.%Y')}:\n\n{chunk}")
+                    await update.message.reply_text(
+                        f"Дайджест за {digest['date'].strftime('%d.%m.%Y')}:\n\n{chunk}"
+                    )
                 else:
                     await update.message.reply_text(chunk)
                     

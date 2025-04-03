@@ -6,6 +6,8 @@ from crewai import Agent
 from langchain.tools import Tool
 
 from config.settings import CATEGORIES
+from concurrent.futures import ThreadPoolExecutor
+import concurrent.futures
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +44,21 @@ class CriticAgent:
             verbose=True,
             tools=[review_tool]
         )
-    
+    def review_categorization_batch(self, messages_batch):
+        """
+        Обработка пакета сообщений
+        
+        Args:
+            messages_batch (list): Список сообщений для проверки
+            
+        Returns:
+            list: Результаты проверки
+        """
+        results = []
+        for message in messages_batch:
+            result = self.review_categorization(message.id, message.category)
+            results.append(result)
+        return results
     def get_message_by_id(self, message_id):
         """
         Получение сообщения по ID через менеджер БД
@@ -152,50 +168,68 @@ class CriticAgent:
                 "error": str(e)
             }
     
-    def review_recent_categorizations(self, limit=10):
+    def review_recent_categorizations(self, confidence_threshold=3, limit=30, batch_size=5, max_workers=3):
         """
-        Проверяет категоризацию последних проанализированных сообщений
+        Проверяет категоризацию сообщений с низкой уверенностью
         
         Args:
-            limit (int): Количество сообщений для проверки
+            confidence_threshold (int): Проверять только сообщения с уверенностью <= этого значения
+            limit (int): Максимальное количество сообщений для проверки
+            batch_size (int): Размер пакета для параллельной обработки
+            max_workers (int): Максимальное количество потоков
             
         Returns:
             dict: Результаты проверки
         """
-        logger.info(f"Запуск проверки категоризации последних {limit} сообщений")
+        logger.info(f"Запуск проверки категоризации сообщений с уверенностью <= {confidence_threshold}")
         
-        # Получаем последние проанализированные сообщения
-        messages = self.db_manager.get_recently_categorized_messages(limit)
+        # Получаем сообщения с низкой уверенностью
+        messages = self.db_manager.get_messages_with_low_confidence(
+            confidence_threshold=confidence_threshold, 
+            limit=limit
+        )
         
         if not messages:
-            logger.info("Нет сообщений для проверки категоризации")
+            logger.info("Нет сообщений с низкой уверенностью для проверки")
             return {
                 "status": "success",
                 "total": 0,
                 "details": []
             }
         
-        results = {
+        logger.info(f"Получено {len(messages)} сообщений с низкой уверенностью")
+        
+        # Разбиваем на пакеты для параллельной обработки
+        batches = [messages[i:i+batch_size] for i in range(0, len(messages), batch_size)]
+        
+        all_results = []
+        # Используем ThreadPoolExecutor для параллельной обработки
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_batch = {
+                executor.submit(self.review_categorization_batch, batch): batch 
+                for batch in batches
+            }
+            
+            for future in concurrent.futures.as_completed(future_to_batch):
+                try:
+                    batch_results = future.result()
+                    all_results.extend(batch_results)
+                except Exception as e:
+                    logger.error(f"Ошибка при обработке пакета сообщений: {str(e)}")
+        
+        # Подсчет статистики
+        updated = sum(1 for r in all_results if r.get("status") == "updated")
+        unchanged = sum(1 for r in all_results if r.get("status") == "unchanged")
+        errors = sum(1 for r in all_results if r.get("status") == "error")
+        
+        logger.info(f"Проверка категоризации завершена. Всего: {len(messages)}, обновлено: {updated}, "
+                f"без изменений: {unchanged}, ошибок: {errors}")
+        
+        return {
             "status": "success",
             "total": len(messages),
-            "updated": 0,
-            "unchanged": 0,
-            "errors": 0,
-            "details": []
+            "updated": updated,
+            "unchanged": unchanged,
+            "errors": errors,
+            "details": all_results
         }
-        
-        for message in messages:
-            logger.debug(f"Проверка категоризации сообщения {message.id}, текущая категория: '{message.category}'")
-            result = self.review_categorization(message.id, message.category)
-            results["details"].append(result)
-            
-            if result["status"] == "updated":
-                results["updated"] += 1
-            elif result["status"] == "unchanged":
-                results["unchanged"] += 1
-            else:
-                results["errors"] += 1
-        
-        logger.info(f"Проверка категоризации завершена. Всего: {results['total']}, обновлено: {results['updated']}, без изменений: {results['unchanged']}, ошибок: {results['errors']}")
-        
-        return results

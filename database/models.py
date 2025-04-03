@@ -18,6 +18,7 @@ class Message(Base):
     text = Column(Text, nullable=True)
     date = Column(DateTime, nullable=False)
     category = Column(String(100), nullable=True)
+    confidence = Column(Integer, nullable=True)  # Уровень уверенности от 1 до 5
     created_at = Column(DateTime, default=datetime.now)
     
     def __repr__(self):
