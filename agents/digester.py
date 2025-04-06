@@ -274,12 +274,15 @@ class DigesterAgent:
             'поправки к законам': "Изменения в существующих законах",
             'другое': "Другие правовые новости и информация"
         }
+        def clean_numbering(text):
+            # Удаляем лишние экранирования точек после цифр
+            return re.sub(r'(\d+)\\\.\s*', r'\1. ', text)
         
         description = category_descriptions.get(category, "")
         if description:
             section_text += f"{description}:\n\n"
         
-        # Добавляем все сообщения, включая те, где нет ссылок
+                # Добавляем все сообщения, включая те, где нет ссылок
         # Не ограничиваем количество, показываем все
         for idx, item in enumerate(all_items):
             formatted_date = item["date"].strftime("%d.%m.%Y")
@@ -298,7 +301,7 @@ class DigesterAgent:
         
         # Добавляем ссылку на полный обзор
         section_text += f"\n[Открыть полный обзор по категории '{category}'](/category/{category})\n"
-        
+        section_text = clean_numbering(section_text)
         return section_text
     def _generate_short_annotation(self, text, max_length=100):
         """
@@ -382,7 +385,7 @@ class DigesterAgent:
             # Создаем базовый обзор на основе имеющихся сообщений
             fallback_text = f"Обзор новостей категории '{category}':\n\n"
             for i, msg in enumerate(messages[:5]):
-                channel_name = msg.channel.replace("@", "")
+                channel_name = msg.channel
                 date_str = msg.date.strftime("%d.%m.%Y")
                 
                 # Извлекаем заголовок сообщения или первую строку
