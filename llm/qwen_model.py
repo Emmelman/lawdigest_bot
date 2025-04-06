@@ -3,6 +3,9 @@
 """
 import logging
 import requests
+import hashlib
+import os
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -43,17 +46,38 @@ class QwenLLM:
         """
         
         try:
-            response = self._generate_response(prompt, max_tokens=50)
+            # Создаем ключ кэша для этого запроса
+            cache_key = hashlib.md5((prompt + f"_classify_tokens{50}").encode()).hexdigest()
+            cache_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'llm_cache')
+            os.makedirs(cache_dir, exist_ok=True)
+            cache_file = os.path.join(cache_dir, f"{cache_key}.txt")
             
-            # Определяем наиболее подходящую категорию из списка
+            # Проверяем кэш
+            if os.path.exists(cache_file):
+                file_age = time.time() - os.path.getmtime(cache_file)
+                if file_age < 86400:  # 24 часа
+                    with open(cache_file, 'r', encoding='utf-8') as f:
+                        result = f.read().strip()
+                        # Далее обработка результата как обычно...
+                        for category in categories:
+                            if category.lower() in result.lower():
+                                return category
+                        return categories[-1]
+            
+            # Если не нашли в кэше, делаем запрос
+            response = self._generate_response(prompt, max_tokens=50)
             result = response.strip()
+            
+            # Сохраняем в кэш
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                f.write(result)
+            
+            # Обрабатываем и возвращаем результат
             for category in categories:
                 if category.lower() in result.lower():
                     return category
-            
-            # Если не нашли точного совпадения
-            return categories[-1]  # Возвращаем "другое" или последнюю категорию
-            
+            return categories[-1]
+        
         except Exception as e:
             logger.error(f"Ошибка при классификации текста: {str(e)}")
             return categories[-1]

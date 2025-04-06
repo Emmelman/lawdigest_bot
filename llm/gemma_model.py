@@ -3,6 +3,9 @@
 """
 import logging
 import requests
+import hashlib
+import os
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +36,28 @@ class GemmaLLM:
             str: Сгенерированный текст
         """
         try:
+            # Проверяем, есть ли результат в кэше
+            cache_key = hashlib.md5((prompt + f"_tokens{max_tokens}_temp{temperature}").encode()).hexdigest()
+            cache_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'llm_cache')
+            os.makedirs(cache_dir, exist_ok=True)
+            cache_file = os.path.join(cache_dir, f"{cache_key}.txt")
+            
+            # Если кэш существует и не старше 24 часов, используем его
+            if os.path.exists(cache_file):
+                file_age = time.time() - os.path.getmtime(cache_file)
+                if file_age < 86400:  # 24 часа
+                    with open(cache_file, 'r', encoding='utf-8') as f:
+                        cached_response = f.read()
+                        logger.debug(f"Использован кэш для промпта (хэш: {cache_key[:8]}...)")
+                        return cached_response
+            
+            # Если нет кэша, генерируем ответ
             response = self._generate_response(prompt, max_tokens, temperature)
+            
+            # Сохраняем в кэш
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                f.write(response)
+            
             return response.strip()
         except Exception as e:
             logger.error(f"Ошибка при генерации текста: {str(e)}")

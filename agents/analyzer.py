@@ -2,6 +2,8 @@
 Агент для анализа и классификации сообщений
 """
 import logging
+import json
+import os
 from langchain.tools import Tool
 from crewai import Agent, Task
 
@@ -56,9 +58,20 @@ class AnalyzerAgent:
         Returns:
             tuple: (категория сообщения, уровень уверенности 1-5)
         """
+        examples = self._load_learning_examples(limit=5)  # Ограничиваем 5 примерами
+    
+        # Формируем текст с примерами
+        examples_text = ""
+        if examples:
+            examples_text = "Примеры правильной классификации из прошлого опыта:\n\n"
+            for i, ex in enumerate(examples):
+                # Сокращаем текст примера для экономии токенов
+                short_text = ex['text'][:150] + "..." if len(ex['text']) > 150 else ex['text']
+                examples_text += f"Пример {i+1}:\nТекст: {short_text}\nКатегория: {ex['category']}\nОбоснование: {ex['justification']}\n\n"
+
         prompt = f"""
         Внимательно проанализируй следующий текст из правительственного Telegram-канала и определи, к какой из следующих категорий он относится:
-
+        {examples_text if examples else ""}
         1. Законодательные инициативы - предложения о создании новых законов или нормативных актов, находящиеся на стадии обсуждения, внесения или рассмотрения в Госдуме. Обычно содержат фразы: "законопроект", "проект закона", "внесен на рассмотрение", "планируется принять".
 
         2. Новая судебная практика - решения, определения, постановления судов, создающие прецеденты или разъясняющие применение норм права. Признаки: упоминание судов (ВС, Верховный Суд, КС, арбитражный суд), номеров дел, дат решений, слов "решение", "определение", "постановление", "практика".
@@ -221,3 +234,20 @@ class AnalyzerAgent:
             agent=self.agent,
             expected_output="Результаты анализа с информацией о количестве проанализированных сообщений и их категориях"
         )
+    def _load_learning_examples(self, limit=10):
+        """Загружает примеры для улучшения классификации"""
+        examples_path = "learning_examples/examples.jsonl"
+        if not os.path.exists(examples_path):
+            return []
+        
+        examples = []
+        try:
+            with open(examples_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+                # Берем последние примеры, ограниченные лимитом
+                for line in lines[-limit:]:
+                    examples.append(json.loads(line))
+            return examples
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке обучающих примеров: {str(e)}")
+            return []

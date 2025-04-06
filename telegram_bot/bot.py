@@ -4,7 +4,8 @@ Telegram-бот для взаимодействия с пользователя�
 """
 import logging
 from datetime import datetime, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+
 from telegram.ext import (
     Application, 
     CommandHandler, 
@@ -34,7 +35,13 @@ class TelegramBot:
         self.db_manager = db_manager
         self.llm_model = llm_model or GemmaLLM()
         self.application = None
-    
+        self.menu_commands = [
+        ("digest", "Краткий дайджест новостей"),
+        ("detail", "Подробный дайджест"),
+        ("cat", "Выбрать категорию новостей"),
+        ("date", "Дайджест за дату (формат: дд.мм.гггг)"),
+        ("help", "Справка")
+        ]
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /start"""
         user = update.effective_user
@@ -99,10 +106,10 @@ class TelegramBot:
             if i == 0:
                 await update.message.reply_text(
                     f"Дайджест за {digest['date'].strftime('%d.%m.%Y')} (краткая версия):\n\n{chunk}",
-                    parse_mode=None  # Отключаем Markdown parsing
+                    parse_mode='HTML'  # Отключаем Markdown parsing
                 )
             else:
-                await update.message.reply_text(chunk, parse_mode=None)
+                await update.message.reply_text(chunk, parse_mode='HTML')
 
     async def digest_detailed_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /digest_detailed - подробный дайджест"""
@@ -127,28 +134,28 @@ class TelegramBot:
             if i == 0:
                 await update.message.reply_text(
                     f"Дайджест за {digest['date'].strftime('%d.%m.%Y')} (подробная версия):\n\n{chunk}",
-                    parse_mode=None  # Отключаем Markdown parsing
+                    parse_mode='HTML'  # Отключаем Markdown parsing
                 )
             else:
-                await update.message.reply_text(chunk, parse_mode=None)
+                await update.message.reply_text(chunk, parse_mode='HTML')
 
-    def _clean_markdown_text(self, text):
+    def _clean_for_html(self, text):
         """
-        Очищает текст от проблемных Markdown-сущностей
-        
-        Args:
-            text (str): Исходный текст с Markdown
-            
-        Returns:
-            str: Безопасный текст
+        Подготавливает текст для отправки с HTML-форматированием в Telegram
         """
         import re
         
-        # Экранируем специальные символы Markdown
-        text = re.sub(r'([_*\[\]()~`>#\+\-=|{}.!])', r'\\\1', text)
+        # Экранируем HTML-символы
+        text = text.replace('&', '&amp;')  # Должно быть первым!
+        text = text.replace('<', '&lt;')
+        text = text.replace('>', '&gt;')
         
-        # Удаляем незакрытые ссылки
-        text = re.sub(r'\[([^\]]+)\]\(([^)]+)(?!\))', r'\1', text)
+        # Заменяем маркеры форматирования на HTML-теги
+        text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)  # **жирный** -> <b>жирный</b>
+        text = re.sub(r'\*(.*?)\*', r'<i>\1</i>', text)      # *курсив* -> <i>курсив</i>
+        
+        # Исправляем экранированные точки после цифр
+        text = re.sub(r'(\d+)\\\.\s*', r'\1. ', text)
         
         return text
     
@@ -156,23 +163,25 @@ class TelegramBot:
         """Обработчик команды /category"""
         keyboard = []
         
-        # Для каждой категории создаем две кнопки - краткий и подробный обзор
+        # Для каждой категории создаем две кнопки с сокращённым текстом
         for cat in CATEGORIES:
+            # Сокращаем название категории, если оно длинное
+            short_name = cat[:15] + "..." if len(cat) > 15 else cat
             keyboard.append([
-                InlineKeyboardButton(f"{cat} (кратко)", callback_data=f"cat_brief_{cat}"),
-                InlineKeyboardButton(f"{cat} (подробно)", callback_data=f"cat_detailed_{cat}")
+                InlineKeyboardButton(f"{short_name} (кратко)", callback_data=f"cat_brief_{cat}"),
+                InlineKeyboardButton(f"{short_name} (подр.)", callback_data=f"cat_detailed_{cat}")
             ])
         
         # Добавляем кнопку для категории "другое"
         keyboard.append([
             InlineKeyboardButton("другое (кратко)", callback_data="cat_brief_другое"),
-            InlineKeyboardButton("другое (подробно)", callback_data="cat_detailed_другое")
+            InlineKeyboardButton("другое (подр.)", callback_data="cat_detailed_другое")
         ])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
-            "Выберите категорию и тип новостей:", 
+            "Выберите категорию и тип обзора:", 
             reply_markup=reply_markup
         )
     
@@ -209,7 +218,7 @@ class TelegramBot:
                 if not section:
                     await query.message.reply_text(
                         f"Информация по категории '{category}' отсутствует в последнем дайджесте.",
-                        parse_mode='Markdown'
+                        parse_mode='HTML'
                     )
                     return
                 
@@ -264,7 +273,7 @@ class TelegramBot:
             await update.message.reply_text(
                 "Извините, произошла ошибка при обработке вашего запроса. "
                 "Пожалуйста, попробуйте позже или воспользуйтесь командами /digest или /category.",
-                parse_mode='Markdown'
+                parse_mode='HTML'
             )
     
     async def date_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -301,7 +310,7 @@ class TelegramBot:
                 if i == 0:
                     await update.message.reply_text(
                         f"Дайджест за {digest['date'].strftime('%d.%m.%Y')}:\n\n{chunk}",
-                        parse_mode='Markdown'
+                        parse_mode='HTML'
                     )
                 else:
                     await update.message.reply_text(chunk)
@@ -411,16 +420,32 @@ class TelegramBot:
         
         # Создаем приложение
         self.application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-        
+        # Настраиваем команды для меню бота
+        commands = [
+        BotCommand(command, description) for command, description in self.menu_commands
+        ]
         # Регистрируем обработчики
         self.application.add_handler(CommandHandler("start", self.start_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("digest", self.digest_command))
+        # Добавьте альтернативную короткую команду для краткого дайджеста
+        self.application.add_handler(CommandHandler("brief", self.digest_command))  
         self.application.add_handler(CommandHandler("digest_detailed", self.digest_detailed_command))
+        # Добавьте альтернативную короткую команду для подробного дайджеста
+        self.application.add_handler(CommandHandler("detail", self.digest_detailed_command))
+        # Добавьте короткую команду для категорий
         self.application.add_handler(CommandHandler("category", self.category_command))
+        self.application.add_handler(CommandHandler("cat", self.category_command))
         self.application.add_handler(CommandHandler("date", self.date_command))
         self.application.add_handler(CallbackQueryHandler(self.button_callback))
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.message_handler))
+        
+        # Используем job queue для установки команд при запуске
+        async def setup_commands_job(context):
+            await context.bot.set_my_commands(commands)
+        
+        # Добавляем задачу в очередь при запуске
+        self.application.job_queue.run_once(setup_commands_job, 1)
         
         # Запускаем бота
         self.application.run_polling()

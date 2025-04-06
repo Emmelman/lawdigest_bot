@@ -2,6 +2,9 @@
 Агент-критик для проверки и исправления категоризации сообщений
 """
 import logging
+import json
+import os
+from datetime import datetime
 from crewai import Agent
 from langchain.tools import Tool
 
@@ -156,6 +159,8 @@ class CriticAgent:
             # Если категория изменилась или категория та же, но Критик более уверен
             if new_category and (new_category != original_category or confidence > message.confidence):
                 success = self.db_manager.update_message_category(message_id, new_category, confidence)
+                if success:
+                    self._save_learning_example(message.text, new_category, justification)
                 logger.info(f"Категория сообщения {message_id} изменена с '{original_category}' на '{new_category}' с уверенностью {confidence}. Обоснование: {justification}")
                 return {
                     "status": "updated",
@@ -247,3 +252,25 @@ class CriticAgent:
             "errors": errors,
             "details": all_results
         }
+    
+    # В класс CriticAgent добавьте:
+    def _save_learning_example(self, text, category, justification):
+        """Сохраняет примеры для обучения аналитика"""
+        try:
+            # Создаем директорию, если ее нет
+            examples_dir = "learning_examples"
+            os.makedirs(examples_dir, exist_ok=True)
+            
+            # Сохраняем пример в JSONL-формате
+            with open(f"{examples_dir}/examples.jsonl", "a", encoding="utf-8") as f:
+                example = {
+                    "text": text, 
+                    "category": category,
+                    "justification": justification,
+                    "timestamp": datetime.now().isoformat()
+                }
+                f.write(json.dumps(example, ensure_ascii=False) + "\n")
+                
+            logger.info(f"Сохранен обучающий пример для категории '{category}'")
+        except Exception as e:
+            logger.error(f"Не удалось сохранить обучающий пример: {str(e)}")

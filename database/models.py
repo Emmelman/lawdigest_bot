@@ -5,6 +5,7 @@ from sqlalchemy import Column, Integer, String, DateTime, Text, create_engine, F
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
+from sqlalchemy import Column, Integer, String, DateTime, Text, create_engine, ForeignKey, Index, UniqueConstraint
 
 Base = declarative_base()
 
@@ -20,7 +21,12 @@ class Message(Base):
     category = Column(String(100), nullable=True)
     confidence = Column(Integer, nullable=True)  # Уровень уверенности от 1 до 5
     created_at = Column(DateTime, default=datetime.now)
-    
+    # Добавляем индексы и ограничения
+    __table_args__ = (
+        Index('idx_message_date', date),
+        Index('idx_message_category', category),
+        UniqueConstraint('channel', 'message_id', name='uix_channel_message_id'),
+    )
     def __repr__(self):
         return f"<Message(id={self.id}, channel='{self.channel}', message_id={self.message_id})>"
 

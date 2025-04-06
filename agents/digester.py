@@ -44,15 +44,24 @@ class DigesterAgent:
         )
     def _extract_title_for_url(self, text, url):
         """
-        Улучшенный метод извлечения заголовка для URL
-        
-        Args:
-            text (str): Полный текст сообщения
-            url (str): URL для которого нужно найти заголовок
-            
-        Returns:
-            str: Извлеченный заголовок
+        Улучшенное извлечение заголовка для URL
         """
+        # Особая обработка для сообщений от Госдумы
+        if "dumainfo" in text and "Государственная Дума" in text:
+            # Ищем конкретное содержание после стандартного заголовка
+            lines = text.split('\n')
+            for i, line in enumerate(lines):
+                if "Государственная Дума" in line and i + 1 < len(lines):
+                    # Берем следующую непустую строку после заголовка
+                    next_line = lines[i + 1].strip()
+                    if next_line and len(next_line) > 10 and "http" not in next_line:
+                        return next_line[:100] + "..." if len(next_line) > 100 else next_line
+                    
+                    # Если следующая строка не подходит, ищем дальше
+                    for j in range(i + 2, min(i + 5, len(lines))):
+                        content = lines[j].strip()
+                        if content and len(content) > 15 and "http" not in content:
+                            return content[:100] + "..." if len(content) > 100 else content
         # Разделим текст на части до и после URL
         parts = text.split(url)
         
@@ -63,49 +72,35 @@ class DigesterAgent:
         after_url = parts[1]
         
         # Ищем заголовок перед URL
-        # Разбиваем текст на абзацы и берем последний перед URL
         before_paragraphs = before_url.split('\n\n')
         last_paragraph = before_paragraphs[-1] if before_paragraphs else ""
         
-        # Для улучшения точности можно разбить на предложения
-        sentences = last_paragraph.split('.')
+        # Проверяем на стандартные шаблонные заголовки
+        if "Государственная Дума" in last_paragraph or "VK" in last_paragraph or len(last_paragraph.strip()) < 20:
+            # Ищем более содержательный текст в первых нескольких строках
+            lines = text.split('\n')
+            for line in lines[1:5]:  # Проверяем первые 5 строк
+                line = line.strip()
+                if len(line) > 30 and "http" not in line and "Telegram" not in line:
+                    return line[:100] + "..." if len(line) > 100 else line
         
-        # Берем последнее предложение, которое обычно содержит заголовок
+        # Далее стандартная логика
+        sentences = last_paragraph.split('.')
         candidate_title = sentences[-1].strip() if sentences else last_paragraph.strip()
         
-        # Если заголовок слишком короткий или его нет, ищем в тексте после URL
+        # Если заголовок слишком короткий, ищем в тексте после URL
         if len(candidate_title) < 15:
             after_paragraphs = after_url.split('\n\n')
             first_paragraph = after_paragraphs[0] if after_paragraphs else ""
             sentences = first_paragraph.split('.')
             candidate_title = sentences[0].strip() if sentences else first_paragraph.strip()
         
-        # Окончательная проверка заголовка
-        if len(candidate_title) < 10:
-            # Если все еще нет подходящего заголовка, используем название домена из URL
-            from urllib.parse import urlparse
-            domain = urlparse(url).netloc
-            return f"Ссылка на {domain}"
-        
-        # Очищаем заголовок от лишних символов
+        # Очищаем и форматируем заголовок
         candidate_title = candidate_title.replace("\n", " ").strip()
         
-        # Восстановление обрезанных слов в начале 
-        # (как в примере "[ная Дума (VK)" -> "Государственная Дума (VK)")
-        if candidate_title.startswith("[") and "]" not in candidate_title[:15]:
-            # Ищем полное слово в тексте
-            words = candidate_title.split()
-            if words and words[0].startswith("["):
-                first_word = words[0][1:]  # Удаляем открывающую скобку
-                
-                # Ищем полное слово в тексте
-                possible_words = [word for word in text.split() 
-                                if word.endswith(first_word) or first_word in word]
-                
-                if possible_words:
-                    # Берем самое длинное подходящее слово
-                    full_word = max(possible_words, key=len)
-                    candidate_title = candidate_title.replace(words[0], "[" + full_word)
+        # Ограничиваем длину заголовка
+        if len(candidate_title) > 80:
+            candidate_title = candidate_title[:77] + "..."
         
         return candidate_title
     def _add_category_icon(self, category):
@@ -286,7 +281,7 @@ class DigesterAgent:
         # Не ограничиваем количество, показываем все
         for idx, item in enumerate(all_items):
             formatted_date = item["date"].strftime("%d.%m.%Y")
-            channel_name = item["channel"].replace("@", "")
+            channel_name = item["channel"]
             
             # Создаем краткую аннотацию сообщения
             message = self.db_manager.get_message_by_id(item["message_id"])
@@ -294,15 +289,17 @@ class DigesterAgent:
 
             if item["has_url"]:
                 # Если есть настоящая ссылка, используем markdown-формат с жирным шрифтом для номера
-                section_text += f"**{idx+1}.** [{item['title']}]**({item['url']}) - {channel_name}, {formatted_date}\n\n"
+                section_text += f"**{idx+1}.** [{item['title']}]({item['url']}) - {channel_name}, {formatted_date}\n{annotation}\n\n"
             else:
                 # Если нет ссылки, просто выводим текст с жирным шрифтом для номера и заголовка
-                section_text += f"**{idx+1}.** **{item['title']}** - {channel_name}, {formatted_date}\n\n"
+                section_text += f"**{idx+1}.** **{item['title']}** - {channel_name}, {formatted_date}\n{annotation}\n\n"
         
         # Добавляем ссылку на полный обзор
         section_text += f"\n[Открыть полный обзор по категории '{category}'](/category/{category})\n"
+       
         section_text = clean_numbering(section_text)
         return section_text
+    
     def _generate_short_annotation(self, text, max_length=100):
         """
         Генерация краткой аннотации сообщения
@@ -398,32 +395,40 @@ class DigesterAgent:
             
             return fallback_text
 
-    def _generate_digest_intro(self, date, total_messages, categories_count, is_brief=True):
+    def _generate_digest_intro(self, date, total_messages, categories_count, is_brief=True, days_back=1):
         """
         Генерация вводной части дайджеста
-        
+    
         Args:
             date (datetime): Дата дайджеста
             total_messages (int): Общее количество сообщений
             categories_count (dict): Количество сообщений по категориям
             is_brief (bool): Признак краткого дайджеста
+            days_back (int): Количество дней, за которые формируется дайджест
             
         Returns:
             str: Текст вводной части
         """
         formatted_date = date.strftime("%d.%m.%Y")
+        
+        # Формируем строку с периодом
+        period_text = formatted_date
+        if days_back > 1:
+            start_date = (date - timedelta(days=days_back-1)).strftime("%d.%m.%Y")
+            period_text = f"период с {start_date} по {formatted_date}"
+        
         categories_info = "\n".join([f"- {cat}: {count} сообщений" for cat, count in categories_count.items() if count > 0])
         
         prompt = f"""
-        Напиши краткое вступление к {"краткому" if is_brief else "подробному"} дайджесту правовых новостей за {formatted_date}.
+        Напиши краткое вступление к {"краткому" if is_brief else "подробному"} дайджесту правовых новостей за {period_text}.
         
         Информация для вступления:
-        - Дата: {formatted_date}
+        - Период: {period_text}
         - Всего сообщений: {total_messages}
         - Распределение по категориям:
         {categories_info}
         
-        Вступление должно быть лаконичным (1-2 абзаца) и содержать общую характеристику новостей за этот день.
+        Вступление должно быть лаконичным (1-2 абзаца) и содержать общую характеристику новостей за этот период.
         {"Упомяни, что это краткая версия, и полный текст доступен по ссылкам." if is_brief else "Упомяни, что это подробная версия дайджеста."}
         """
         
@@ -501,7 +506,7 @@ class DigesterAgent:
         if digest_type in ["brief", "both"]:
             try:
                 # Генерируем вводную часть
-                intro_text = self._generate_digest_intro(end_date, total_messages, categories_count, is_brief=True)
+                intro_text = self._generate_digest_intro(end_date, total_messages, categories_count, is_brief=True, days_back=days_back)
                 
                 # Формируем полный текст краткого дайджеста
                 brief_text = f"{intro_text}\n\n"
@@ -542,7 +547,7 @@ class DigesterAgent:
         if digest_type in ["detailed", "both"]:
             try:
                 # Генерируем вводную часть
-                intro_text = self._generate_digest_intro(end_date, total_messages, categories_count, is_brief=False)
+                intro_text = self._generate_digest_intro(end_date, total_messages, categories_count, is_brief=False, days_back=days_back)
                 
                 # Формируем полный текст подробного дайджеста
                 detailed_text = f"{intro_text}\n\n"

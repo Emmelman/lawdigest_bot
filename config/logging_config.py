@@ -22,10 +22,12 @@ def setup_logging():
     )
     
     # Настройка для файла
+    # Настройка для файла с явным указанием кодировки UTF-8
     file_handler = RotatingFileHandler(
-        log_file_path,
-        maxBytes=10*1024*1024,  # 10MB
-        backupCount=5
+    log_file_path,
+    maxBytes=10*1024*1024,  # 10MB
+    backupCount=5,
+    encoding='utf-8'  # Добавьте эту строку
     )
     file_handler.setFormatter(formatter)
     file_handler.setLevel(logging.INFO)
