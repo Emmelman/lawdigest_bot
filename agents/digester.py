@@ -285,6 +285,10 @@ class DigesterAgent:
             formatted_date = item["date"].strftime("%d.%m.%Y")
             channel_name = item["channel"].replace("@", "")
             
+            # Создаем краткую аннотацию сообщения
+            message = self.db_manager.get_message_by_id(item["message_id"])
+            annotation = self._generate_short_annotation(message.text)
+
             if item["has_url"]:
                 # Если есть настоящая ссылка, используем markdown-формат с жирным шрифтом для номера
                 section_text += f"**{idx+1}.** [{item['title']}]**({item['url']}) - {channel_name}, {formatted_date}\n\n"
@@ -296,7 +300,24 @@ class DigesterAgent:
         section_text += f"\n[Открыть полный обзор по категории '{category}'](/category/{category})\n"
         
         return section_text
-
+    def _generate_short_annotation(self, text, max_length=100):
+        """
+        Генерация краткой аннотации сообщения
+        """
+        # Удаляем URL из текста
+        text = re.sub(r'https?://\S+', '', text)
+        
+        # Берем первые предложения
+        sentences = text.split('. ')
+        annotation = ''
+        for sentence in sentences:
+            if len(annotation) + len(sentence) <= max_length:
+                annotation += sentence + '. '
+            else:
+                break
+        
+        return annotation.strip() + '...' if len(annotation) < len(text) else annotation
+    
     def _generate_detailed_section(self, category, messages):
         """
         Генерация подробного обзора по категории
@@ -350,7 +371,7 @@ class DigesterAgent:
             5. Быть 2-3 абзаца длиной
             """
             
-            response = self.llm_model.generate(prompt, max_tokens=800, temperature=0.7)
+            response = self.llm_model.generate(prompt, max_tokens=1500, temperature=0.7)
             if not response or len(response.strip()) < 50:
                 raise ValueError("Получен пустой или слишком короткий ответ")
             return response

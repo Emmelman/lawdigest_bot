@@ -89,17 +89,20 @@ class TelegramBot:
             await update.message.reply_text("К сожалению, дайджест еще не сформирован.")
             return
         
+        # Очищаем текст от проблемных Markdown-сущностей
+        safe_text = self._clean_markdown_text(digest["text"])
+        
         # Отправляем дайджест по частям, так как Telegram ограничивает длину сообщения
-        chunks = self._split_text(digest["text"])
+        chunks = self._split_text(safe_text)
         
         for i, chunk in enumerate(chunks):
             if i == 0:
                 await update.message.reply_text(
                     f"Дайджест за {digest['date'].strftime('%d.%m.%Y')} (краткая версия):\n\n{chunk}",
-                    parse_mode='Markdown'
+                    parse_mode=None  # Отключаем Markdown parsing
                 )
             else:
-                await update.message.reply_text(chunk)
+                await update.message.reply_text(chunk, parse_mode=None)
 
     async def digest_detailed_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /digest_detailed - подробный дайджест"""
@@ -114,17 +117,40 @@ class TelegramBot:
             await update.message.reply_text("К сожалению, подробный дайджест еще не сформирован.")
             return
         
+        # Очищаем текст от проблемных Markdown-сущностей
+        safe_text = self._clean_markdown_text(digest["text"])
+        
         # Отправляем дайджест по частям, так как Telegram ограничивает длину сообщения
-        chunks = self._split_text(digest["text"])
+        chunks = self._split_text(safe_text)
         
         for i, chunk in enumerate(chunks):
             if i == 0:
                 await update.message.reply_text(
                     f"Дайджест за {digest['date'].strftime('%d.%m.%Y')} (подробная версия):\n\n{chunk}",
-                    parse_mode='Markdown'
+                    parse_mode=None  # Отключаем Markdown parsing
                 )
             else:
-                await update.message.reply_text(chunk)
+                await update.message.reply_text(chunk, parse_mode=None)
+
+    def _clean_markdown_text(self, text):
+        """
+        Очищает текст от проблемных Markdown-сущностей
+        
+        Args:
+            text (str): Исходный текст с Markdown
+            
+        Returns:
+            str: Безопасный текст
+        """
+        import re
+        
+        # Экранируем специальные символы Markdown
+        text = re.sub(r'([_*\[\]()~`>#\+\-=|{}.!])', r'\\\1', text)
+        
+        # Удаляем незакрытые ссылки
+        text = re.sub(r'\[([^\]]+)\]\(([^)]+)(?!\))', r'\1', text)
+        
+        return text
     
     async def category_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /category"""
@@ -346,7 +372,39 @@ class TelegramBot:
             parts.append(current_part)
         
         return parts
-    
+    def _clean_markdown_text(self, text):
+        """
+        Корректная обработка Markdown текста
+        """
+        import re
+        
+        # Специальная функция для экранирования только специфических символов
+        def escape_markdown(text):
+            escape_chars = r'_*[]()~`>#+-=|{}.!'
+            return ''.join(['\\' + char if char in escape_chars else char for char in text])
+        
+        # Обработка ссылок, чтобы они корректно отображались
+        def process_links(match):
+            text, url = match.groups()
+            # Экранируем текст внутри квадратных скобок
+            safe_text = escape_markdown(text)
+            return f'[{safe_text}]({url})'
+        
+        # Обработка жирного текста
+        def process_bold(match):
+            text = match.group(1)
+            # Экранируем текст внутри жирного форматирования
+            safe_text = escape_markdown(text)
+            return f'*{safe_text}*'
+        
+        # Сначала обрабатываем ссылки
+        text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', process_links, text)
+        
+        # Затем обрабатываем жирный текст
+        text = re.sub(r'\*\*([^*]+)\*\*', process_bold, text)
+        
+        return text
+
     def run(self):
         """Запуск бота"""
         logger.info("Запуск Telegram-бота")
