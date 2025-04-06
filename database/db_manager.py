@@ -474,57 +474,158 @@ class DatabaseManager:
         finally:
             session.close()        
 
-def get_message_by_channel_and_id(self, channel, message_id):
+    def get_message_by_channel_and_id(self, channel, message_id):
+            """
+            Получение сообщения по названию канала и ID сообщения в этом канале
+            
+            Args:
+                channel (str): Название канала
+                message_id (int): ID сообщения в канале
+                
+            Returns:
+                Message: Объект сообщения или None
+            """
+            session = self.Session()
+            try:
+                message = session.query(Message).filter_by(
+                    channel=channel, 
+                    message_id=message_id
+                ).first()
+                return message
+            except Exception as e:
+                logger.error(f"Ошибка при получении сообщения по каналу и ID: {str(e)}")
+                return None
+            finally:
+                session.close()                 
+
+
+
+    def get_digest_by_date(self, date):
+            """
+            Получение дайджеста по дате
+            
+            Args:
+                date (datetime): Дата дайджеста
+                
+            Returns:
+                Digest: Объект дайджеста
+            """
+            session = self.Session()
+            try:
+                # Ищем дайджест по дате (округляя до дня)
+                start_date = datetime(date.year, date.month, date.day)
+                end_date = start_date + timedelta(days=1)
+                
+                digest = session.query(Digest).filter(
+                    Digest.date >= start_date,
+                    Digest.date < end_date
+                ).first()
+                
+                return digest
+            except Exception as e:
+                logger.error(f"Ошибка при получении дайджеста по дате: {str(e)}")
+                return None
+            finally:
+                session.close() 
+    def get_latest_digest_with_sections(self, digest_type=None):
         """
-        Получение сообщения по названию канала и ID сообщения в этом канале
+        Получение последнего дайджеста со всеми секциями
         
         Args:
-            channel (str): Название канала
-            message_id (int): ID сообщения в канале
+            digest_type (str, optional): Тип дайджеста ("brief", "detailed")
             
         Returns:
-            Message: Объект сообщения или None
+            dict: Данные о дайджесте и его секциях
         """
+        from sqlalchemy.orm import joinedload
+
         session = self.Session()
         try:
-            message = session.query(Message).filter_by(
-                channel=channel, 
-                message_id=message_id
-            ).first()
-            return message
+            query = session.query(Digest).options(
+                joinedload(Digest.sections)
+            ).order_by(Digest.date.desc())
+            
+            if digest_type:
+                query = query.filter(Digest.digest_type == digest_type)
+                
+            digest = query.first()
+            
+            if not digest:
+                return None
+                
+            # Создаем словарь с данными
+            result = {
+                "id": digest.id,
+                "date": digest.date,
+                "text": digest.text,
+                "digest_type": digest.digest_type,
+                "sections": []
+            }
+            
+            # Добавляем данные о секциях
+            for section in digest.sections:
+                result["sections"].append({
+                    "id": section.id,
+                    "category": section.category,
+                    "text": section.text
+                })
+                
+            return result
         except Exception as e:
-            logger.error(f"Ошибка при получении сообщения по каналу и ID: {str(e)}")
+            logger.error(f"Ошибка при получении последнего дайджеста: {str(e)}")
             return None
         finally:
-            session.close()                 
+            session.close()
 
-
-
-def get_digest_by_date(self, date):
+    def get_digest_by_date_with_sections(self, date):
         """
-        Получение дайджеста по дате
+        Получение дайджеста по дате со всеми секциями
         
         Args:
             date (datetime): Дата дайджеста
             
         Returns:
-            Digest: Объект дайджеста
+            dict: Данные о дайджесте и его секциях
         """
+        from sqlalchemy.orm import joinedload
+
         session = self.Session()
         try:
             # Ищем дайджест по дате (округляя до дня)
             start_date = datetime(date.year, date.month, date.day)
             end_date = start_date + timedelta(days=1)
             
-            digest = session.query(Digest).filter(
+            digest = session.query(Digest).options(
+                joinedload(Digest.sections)
+            ).filter(
                 Digest.date >= start_date,
                 Digest.date < end_date
             ).first()
             
-            return digest
+            if not digest:
+                return None
+                
+            # Создаем словарь с данными
+            result = {
+                "id": digest.id,
+                "date": digest.date,
+                "text": digest.text,
+                "digest_type": digest.digest_type,
+                "sections": []
+            }
+            
+            # Добавляем данные о секциях
+            for section in digest.sections:
+                result["sections"].append({
+                    "id": section.id,
+                    "category": section.category,
+                    "text": section.text
+                })
+                
+            return result
         except Exception as e:
             logger.error(f"Ошибка при получении дайджеста по дате: {str(e)}")
             return None
         finally:
-            session.close()  
+            session.close()             
                        

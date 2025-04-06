@@ -56,21 +56,13 @@ class DataCollectorAgent:
     async def _get_channel_messages(self, channel, days_back=1, limit_per_request=100):
         """
         Получение сообщений из канала за указанный период
-        
-        Args:
-            channel (str): Название канала
-            days_back (int): За сколько дней назад собирать сообщения
-            limit_per_request (int): Максимальное количество сообщений в одном запросе (для пагинации)
-            
-        Returns:
-            list: Список сообщений
         """
         await self._init_client()
         
         try:
             entity = await self.client.get_entity(channel)
             
-            # Определение дат для фильтрации
+            # Определение дат для фильтрации - используем datetime без timezone
             end_date = datetime.now()
             start_date = end_date - timedelta(days=days_back)
             
@@ -100,29 +92,37 @@ class DataCollectorAgent:
                 total_messages += len(messages_list)
                 
                 # Фильтруем сообщения по дате
-                
                 filtered_messages = []
                 for msg in messages_list:
-                    # Преобразуем дату из Telegram (aware) в naive datetime
+                    # Всегда преобразуем дату из Telegram (aware) в naive datetime
                     msg_date = msg.date.replace(tzinfo=None)
+                    # Теперь обе даты naive, можно сравнивать
                     if start_date <= msg_date <= end_date:
                         filtered_messages.append(msg)
                 all_messages.extend(filtered_messages)
                 
                 # Проверяем, нужно ли продолжать пагинацию
-                if len(messages_list) < limit_per_request or not messages_list[-1].date >= start_date:
-                    # Либо получили меньше сообщений, чем запрашивали (конец списка),
-                    # либо последнее сообщение старше начальной даты
+                if len(messages_list) < limit_per_request:
+                    # Получили меньше сообщений, чем запрашивали (конец списка)
                     break
                     
-                # Устанавливаем смещение для следующего запроса
-                offset_id = messages_list[-1].id
-                
-                logger.debug(f"Получено {len(filtered_messages)} сообщений из {len(messages_list)}. "
-                           f"Продолжаем пагинацию с ID {offset_id}")
+                # Проверяем дату последнего сообщения
+                if messages_list:
+                    last_date = messages_list[-1].date.replace(tzinfo=None)
+                    if last_date < start_date:
+                        # Последнее сообщение старше начальной даты
+                        break
+                    
+                    # Устанавливаем смещение для следующего запроса
+                    offset_id = messages_list[-1].id
+                    
+                    logger.debug(f"Получено {len(filtered_messages)} сообщений из {len(messages_list)}. "
+                            f"Продолжаем пагинацию с ID {offset_id}")
+                else:
+                    break
             
             logger.info(f"Всего получено {total_messages} сообщений, отфильтровано {len(all_messages)} "
-                      f"за указанный период из канала {channel}")
+                    f"за указанный период из канала {channel}")
             
             return all_messages
             
@@ -133,13 +133,6 @@ class DataCollectorAgent:
     async def _process_channel(self, channel, days_back=1):
         """
         Обработка канала: получение и сохранение сообщений
-        
-        Args:
-            channel (str): Название канала
-            days_back (int): За сколько дней назад собирать сообщения
-            
-        Returns:
-            int: Количество новых сообщений
         """
         messages = await self._get_channel_messages(channel, days_back=days_back)
         new_messages_count = 0
@@ -152,25 +145,30 @@ class DataCollectorAgent:
             
             # Сохраняем сообщение в БД
             try:
-                # Проверяем, существует ли уже такое сообщение
+                # Проверяем, существует ли уже такое сообщение в базе
                 existing_message = self.db_manager.get_message_by_channel_and_id(channel, message.id)
                 
                 if existing_message:
                     duplicates_count += 1
                     continue
                 
+                # Убедимся, что мы всегда сохраняем naive datetime
+                message_date = message.date
+                if message_date.tzinfo is not None:
+                    message_date = message_date.replace(tzinfo=None)
+                    
                 self.db_manager.save_message(
                     channel=channel,
                     message_id=message.id,
                     text=message.message,
-                    date=message.date.replace(tzinfo=None)
+                    date=message_date
                 )
                 new_messages_count += 1
             except Exception as e:
                 logger.error(f"Ошибка при сохранении сообщения из канала {channel}: {str(e)}")
         
         logger.info(f"Канал {channel}: сохранено {new_messages_count} новых сообщений, "
-                   f"пропущено {duplicates_count} дубликатов")
+                f"пропущено {duplicates_count} дубликатов")
         
         return new_messages_count
     
@@ -224,8 +222,30 @@ class DataCollectorAgent:
         """
         logger.info(f"Запуск параллельного сбора данных из каналов за последние {days_back} дней: {', '.join(TELEGRAM_CHANNELS)}")
         
-        loop = asyncio.get_event_loop()
-        results = loop.run_until_complete(self._collect_all_channels_parallel(days_back=days_back))
+        # Проверяем, не находимся ли мы уже в асинхронном контексте
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # Если event loop уже запущен, используем asyncio.create_task
+                # или просто возвращаем корутину для await
+                logger.info("Event loop уже запущен, используем асинхронный контекст")
+                # Мы не можем просто вернуть корутину из синхронной функции,
+                # поэтому создадим пустые результаты, если находимся в asyncio.run
+                return {
+                    "status": "deferred", 
+                    "message": "Сбор данных будет выполнен в асинхронном режиме",
+                    "coroutine": self._collect_all_channels_parallel(days_back=days_back)
+                }
+            else:
+                # Если event loop не запущен, используем run_until_complete
+                results = loop.run_until_complete(self._collect_all_channels_parallel(days_back=days_back))
+        except RuntimeError:
+            # Если не удалось получить event loop или он уже запущен, 
+            # создаем новый loop в отдельном потоке
+            logger.info("Создание отдельного event loop для сбора данных")
+            new_loop = asyncio.new_event_loop()
+            results = new_loop.run_until_complete(self._collect_all_channels_parallel(days_back=days_back))
+            new_loop.close()
         
         total_messages = sum(results.values())
         logger.info(f"Сбор данных завершен. Всего собрано {total_messages} новых сообщений")

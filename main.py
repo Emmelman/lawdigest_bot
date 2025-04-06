@@ -165,10 +165,11 @@ async def run_full_workflow(days_back=1):
         from agents.data_collector import DataCollectorAgent
         
         collector = DataCollectorAgent(db_manager)
-        collect_result = collector.collect_data(days_back=days_back)
-        total_messages = collect_result["total_new_messages"]
+        # Изменяем вызов, чтобы использовать асинхронную версию напрямую
+        collect_result = await collector._collect_all_channels_parallel(days_back=days_back)
+        total_messages = sum(collect_result.values())
         
-        logger.info(f"Всего собрано {total_messages} сообщений")
+        logger.info(f"Всего собрано {total_messages} новых сообщений")
         
         if total_messages == 0:
             logger.info("Нет новых сообщений для анализа. Проверка на существующие сообщения с категориями...")

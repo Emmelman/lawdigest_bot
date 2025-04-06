@@ -95,7 +95,8 @@ class TelegramBot:
         for i, chunk in enumerate(chunks):
             if i == 0:
                 await update.message.reply_text(
-                    f"Дайджест за {digest['date'].strftime('%d.%m.%Y')} (краткая версия):\n\n{chunk}"
+                    f"Дайджест за {digest['date'].strftime('%d.%m.%Y')} (краткая версия):\n\n{chunk}",
+                    parse_mode='Markdown'
                 )
             else:
                 await update.message.reply_text(chunk)
@@ -119,7 +120,8 @@ class TelegramBot:
         for i, chunk in enumerate(chunks):
             if i == 0:
                 await update.message.reply_text(
-                    f"Дайджест за {digest['date'].strftime('%d.%m.%Y')} (подробная версия):\n\n{chunk}"
+                    f"Дайджест за {digest['date'].strftime('%d.%m.%Y')} (подробная версия):\n\n{chunk}",
+                    parse_mode='Markdown'
                 )
             else:
                 await update.message.reply_text(chunk)
@@ -161,47 +163,48 @@ class TelegramBot:
                 digest_type = parts[1]  # brief или detailed
                 category = parts[2]     # название категории
             
-            # Получаем последний дайджест нужного типа
-            digest = self.db_manager.get_latest_digest_with_sections(digest_type=digest_type)
-            
-            if not digest:
-                # Если дайджеста такого типа нет, берем любой
-                digest = self.db_manager.get_latest_digest_with_sections()
-            
-            if not digest:
-                await query.message.reply_text(f"К сожалению, дайджест еще не сформирован.")
-                return
-            
-            # Ищем соответствующую секцию в дайджесте
-            section = next(
-                (s for s in digest["sections"] if s["category"] == category), 
-                None
-            )
-            
-            if not section:
-                await query.message.reply_text(
-                    f"Информация по категории '{category}' отсутствует в последнем дайджесте."
+                # Получаем последний дайджест нужного типа
+                digest = self.db_manager.get_latest_digest_with_sections(digest_type=digest_type)
+                
+                if not digest:
+                    # Если дайджеста такого типа нет, берем любой
+                    digest = self.db_manager.get_latest_digest_with_sections()
+                
+                if not digest:
+                    await query.message.reply_text(f"К сожалению, дайджест еще не сформирован.")
+                    return
+                
+                # Ищем соответствующую секцию в дайджесте
+                section = next(
+                    (s for s in digest["sections"] if s["category"] == category), 
+                    None
                 )
-                return
-            
-            # Подготавливаем текст для ответа
-            digest_type_name = "Краткий обзор" if digest_type == "brief" else "Подробный обзор"
-            header = f"Дайджест за {digest['date'].strftime('%d.%m.%Y')}\n{digest_type_name} категории: {category}\n\n"
-            
-            # Отправляем секцию (возможно, разбитую на части)
-            full_text = header + section["text"]
-            chunks = self._split_text(full_text)
-            
-            for chunk in chunks:
-                await query.message.reply_text(chunk)
+                
+                if not section:
+                    await query.message.reply_text(
+                        f"Информация по категории '{category}' отсутствует в последнем дайджесте.",
+                        parse_mode='Markdown'
+                    )
+                    return
+                
+                # Подготавливаем текст для ответа
+                digest_type_name = "Краткий обзор" if digest_type == "brief" else "Подробный обзор"
+                header = f"Дайджест за {digest['date'].strftime('%d.%m.%Y')}\n{digest_type_name} категории: {category}\n\n"
+                
+                # Отправляем секцию (возможно, разбитую на части)
+                full_text = header + section["text"]
+                chunks = self._split_text(full_text)
+                
+                for chunk in chunks:
+                    await query.message.reply_text(chunk)
     
     async def message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик текстовых сообщений"""
         user_message = update.message.text
         
         # Получаем контекст для ответа
-        brief_digest = self.db_manager.get_latest_digest(digest_type="brief")
-        detailed_digest = self.db_manager.get_latest_digest(digest_type="detailed")
+        brief_digest = self.db_manager.get_latest_digest_with_sections(digest_type="brief")
+        detailed_digest = self.db_manager.get_latest_digest_with_sections(digest_type="detailed")
         
         # Используем подробный дайджест для контекста, если он есть
         digest = detailed_digest or brief_digest
@@ -218,7 +221,7 @@ class TelegramBot:
         Вопрос: {user_message}
         
         Контекст (дайджест правовых новостей):
-        {digest.text}
+        {digest["text"]}
         
         Дай краткий и точный ответ на вопрос на основе представленного контекста.
         Если информации недостаточно, так и скажи.
@@ -234,7 +237,8 @@ class TelegramBot:
             logger.error(f"Ошибка при генерации ответа: {str(e)}")
             await update.message.reply_text(
                 "Извините, произошла ошибка при обработке вашего запроса. "
-                "Пожалуйста, попробуйте позже или воспользуйтесь командами /digest или /category."
+                "Пожалуйста, попробуйте позже или воспользуйтесь командами /digest или /category.",
+                parse_mode='Markdown'
             )
     
     async def date_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -270,7 +274,8 @@ class TelegramBot:
             for i, chunk in enumerate(chunks):
                 if i == 0:
                     await update.message.reply_text(
-                        f"Дайджест за {digest['date'].strftime('%d.%m.%Y')}:\n\n{chunk}"
+                        f"Дайджест за {digest['date'].strftime('%d.%m.%Y')}:\n\n{chunk}",
+                        parse_mode='Markdown'
                     )
                 else:
                     await update.message.reply_text(chunk)
