@@ -518,7 +518,7 @@ class DigesterAgent:
         total_messages = 0
         
         for msg in messages:
-            category = msg.category or "другое"
+            category = msg.category if hasattr(msg, 'category') else "другое"
             if category not in messages_by_category:
                 messages_by_category[category] = []
             messages_by_category[category].append(msg)
