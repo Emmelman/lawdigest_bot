@@ -3,6 +3,7 @@
 Telegram-бот для взаимодействия с пользователями
 """
 import logging
+import re
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 
@@ -104,8 +105,9 @@ class TelegramBot:
         
         for i, chunk in enumerate(chunks):
             if i == 0:
+                text_html = self._convert_to_html(chunk)
                 await update.message.reply_text(
-                    f"Дайджест за {digest['date'].strftime('%d.%m.%Y')} (краткая версия):\n\n{chunk}",
+                    f"Дайджест за {digest['date'].strftime('%d.%m.%Y')} (краткая версия):\n\n{text_html}",
                     parse_mode='HTML'  # Отключаем Markdown parsing
                 )
             else:
@@ -132,8 +134,9 @@ class TelegramBot:
         
         for i, chunk in enumerate(chunks):
             if i == 0:
+                text_html = self._convert_to_html(chunk)
                 await update.message.reply_text(
-                    f"Дайджест за {digest['date'].strftime('%d.%m.%Y')} (подробная версия):\n\n{chunk}",
+                    f"Дайджест за {digest['date'].strftime('%d.%m.%Y')} (подробная версия):\n\n{text_html}",
                     parse_mode='HTML'  # Отключаем Markdown parsing
                 )
             else:
@@ -231,7 +234,7 @@ class TelegramBot:
                 chunks = self._split_text(full_text)
                 
                 for chunk in chunks:
-                    await query.message.reply_text(chunk)
+                    await query.message.reply_text(chunk, parse_mode='HTML')
     
     async def message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик текстовых сообщений"""
@@ -308,8 +311,9 @@ class TelegramBot:
             
             for i, chunk in enumerate(chunks):
                 if i == 0:
+                    text_html = self._convert_to_html(chunk)
                     await update.message.reply_text(
-                        f"Дайджест за {digest['date'].strftime('%d.%m.%Y')}:\n\n{chunk}",
+                        f"Дайджест за {digest['date'].strftime('%d.%m.%Y')}:\n\n{text_html}",
                         parse_mode='HTML'
                     )
                 else:
@@ -411,6 +415,16 @@ class TelegramBot:
         
         # Затем обрабатываем жирный текст
         text = re.sub(r'\*\*([^*]+)\*\*', process_bold, text)
+        
+        return text
+    def _convert_to_html(self, text):
+        """Конвертирует Markdown-подобный синтаксис в HTML"""
+        # Заменяем звездочки на HTML-теги
+        text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)  # **жирный** -> <b>жирный</b>
+        text = re.sub(r'\*(.*?)\*', r'<i>\1</i>', text)      # *курсив* -> <i>курсив</i>
+        
+        # Удаляем экранирующие символы
+        text = re.sub(r'\\([.()[\]{}])', r'\1', text)  # \.() -> .()
         
         return text
 
