@@ -143,7 +143,7 @@ class AnalyzerAgent:
             logger.error(f"Ошибка при классификации текста: {str(e)}")
             return "другое", 1
         
-    def analyze_messages(self, limit=50, batch_size=5):
+    def analyze_messages(self, limit=50, batch_size=10):
         """
         Инструмент для анализа и классификации сообщений с оценкой уверенности
         
@@ -175,43 +175,85 @@ class AnalyzerAgent:
         batches = [messages[i:i+batch_size] for i in range(0, len(messages), batch_size)]
         logger.info(f"Разделено на {len(batches)} пакетов по ~{batch_size} сообщений")
         
-        for batch_idx, batch in enumerate(batches):
-            logger.info(f"Обработка пакета {batch_idx+1}/{len(batches)}")
+        # Создаем пул для обработки каждого пакета
+        with ThreadPoolExecutor(max_workers=min(4, len(batches))) as executor:
+            future_to_batch = {}
             
-            for msg in batch:
-                if not msg.text:
-                    continue
-                    
-                try:
-                    # Классифицируем сообщение с оценкой уверенности
-                    category, confidence = self._classify_message(msg.text)
-                    
-                    # Обновляем категорию и уровень уверенности в БД
-                    if self.db_manager.update_message_category(msg.id, category, confidence):
-                        categories_count[category] += 1
-                        confidence_stats[confidence] += 1
-                        analyzed_count += 1
+            # Функция для обработки одного пакета
+            def process_batch(batch):
+                batch_results = []
+                for msg in batch:
+                    if not msg.text:
+                        continue
+                    try:
+                        # Классифицируем сообщение
+                        category, confidence = self._classify_message(msg.text)
                         
-                        # Логируем результат для отладки
-                        logger.debug(f"Сообщение {msg.id}: категория='{category}', уверенность={confidence}")
+                        # Создаем результат для этого сообщения
+                        result = {
+                            "message_id": msg.id,
+                            "category": category,
+                            "confidence": confidence,
+                            "success": True
+                        }
                         
-                        # Если категория "другое" или низкая уверенность, и включена быстрая проверка
+                        # Если включена быстрая проверка и нужен дополнительный анализ
                         if hasattr(self, 'fast_check') and self.fast_check and (category == "другое" or confidence <= 2):
                             try:
                                 from agents.critic import CriticAgent
                                 critic = CriticAgent(self.db_manager)
-                                result = critic.review_categorization(msg.id, category)
-                                if result["status"] == "updated":
-                                    # Обновляем статистику, если критик изменил категорию
-                                    categories_count[category] -= 1
-                                    categories_count[result["new_category"]] += 1
-                                    logger.info(f"Критик изменил категорию сообщения {msg.id}: {category} -> {result['new_category']}")
+                                critic_result = critic.review_categorization(msg.id, category)
+                                
+                                # Если критик изменил категорию, используем его результат
+                                if critic_result["status"] == "updated":
+                                    result["category"] = critic_result["new_category"]
+                                    result["confidence"] = critic_result["confidence"]
+                                    result["reviewed_by_critic"] = True
                             except Exception as e:
                                 logger.error(f"Ошибка при быстрой проверке сообщения {msg.id}: {str(e)}")
+                    except Exception as e:
+                        result = {
+                            "message_id": msg.id,
+                            "error": str(e),
+                            "success": False
+                        }
+                    
+                    batch_results.append(result)
+                return batch_results
+            
+            # Запускаем задачи на обработку пакетов
+            for i, batch in enumerate(batches):
+                future = executor.submit(process_batch, batch)
+                future_to_batch[future] = i
+            
+            # Обрабатываем результаты
+            all_results = []
+            for future in as_completed(future_to_batch):
+                batch_idx = future_to_batch[future]
+                try:
+                    batch_results = future.result()
+                    all_results.extend(batch_results)
+                    logger.info(f"Обработан пакет {batch_idx+1}/{len(batches)}")
                 except Exception as e:
-                    logger.error(f"Ошибка при анализе сообщения {msg.id}: {str(e)}")
+                    logger.error(f"Ошибка при обработке пакета {batch_idx+1}: {str(e)}")
         
-        logger.info(f"Анализ завершен. Проанализировано {analyzed_count} сообщений")
+        # Обновляем категории всех сообщений в БД
+        successful_updates = []
+        for result in all_results:
+            if result["success"]:
+                success = self.db_manager.update_message_category(
+                    result["message_id"], 
+                    result["category"], 
+                    result["confidence"]
+                )
+                
+                if success:
+                    categories_count[result["category"]] += 1
+                    confidence_stats[result["confidence"]] += 1
+                    analyzed_count += 1
+                    successful_updates.append(result)
+        
+        logger.info(f"Анализ завершен. Проанализировано и успешно обновлено {analyzed_count} сообщений")
         logger.info(f"Распределение по категориям: {categories_count}")
         logger.info(f"Распределение по уверенности: {confidence_stats}")
         
@@ -219,7 +261,8 @@ class AnalyzerAgent:
             "status": "success",
             "analyzed_count": analyzed_count,
             "categories": categories_count,
-            "confidence_stats": confidence_stats
+            "confidence_stats": confidence_stats,
+            "all_results": all_results
         }
     # В AnalyzerAgent:
     def analyze_messages_batched(self, limit=500, batch_size=20, confidence_threshold=3):

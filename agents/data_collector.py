@@ -176,22 +176,26 @@ class DataCollectorAgent:
     Оптимизированный метод для параллельного сбора данных из каналов
     """
 
-    async def _collect_all_channels_parallel(self, days_back=1):
+    async def _collect_all_channels_parallel(self, days_back=1, channels=None):
         """
-        Параллельный сбор данных со всех каналов
+        Параллельный сбор данных со всех или указанных каналов
         
         Args:
             days_back (int): За сколько дней назад собирать сообщения
-            
+            channels (list, optional): Список каналов для сбора данных, если None - используем все доступные
+                
         Returns:
             dict: Словарь с результатами {канал: количество новых сообщений}
         """
         await self._init_client()
         results = {}
         
+        # Используем переданные каналы или берем из настроек
+        channels_to_process = channels or TELEGRAM_CHANNELS
+        
         # Создаем задачи для всех каналов
         tasks = []
-        for channel in TELEGRAM_CHANNELS:
+        for channel in channels_to_process:
             task = self._process_channel(channel, days_back=days_back)
             tasks.append(task)
         
@@ -199,7 +203,7 @@ class DataCollectorAgent:
         channel_results = await asyncio.gather(*tasks, return_exceptions=True)
         
         # Обрабатываем результаты
-        for i, channel in enumerate(TELEGRAM_CHANNELS):
+        for i, channel in enumerate(channels_to_process):
             result = channel_results[i]
             if isinstance(result, Exception):
                 logger.error(f"Ошибка при обработке канала {channel}: {str(result)}")

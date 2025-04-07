@@ -10,7 +10,26 @@ from sqlalchemy import Column, Integer, String, DateTime, Text, create_engine, F
 Base = declarative_base()
 
 # В database/models.py
-
+class Message(Base):
+    """Модель для хранения сообщений из Telegram-каналов"""
+    __tablename__ = "messages"
+    
+    id = Column(Integer, primary_key=True)
+    channel = Column(String(100), nullable=False)
+    message_id = Column(Integer, nullable=False)
+    text = Column(Text, nullable=False)
+    date = Column(DateTime, nullable=False)
+    category = Column(String(100))
+    confidence = Column(Integer, default=0)  # Уровень уверенности 1-5
+    
+    # Уникальный индекс чтобы избежать дублирования сообщений
+    __table_args__ = (
+        UniqueConstraint('channel', 'message_id', name='uix_message_channel_id'),
+    )
+    
+    def __repr__(self):
+        return f"<Message(id={self.id}, channel='{self.channel}', message_id={self.message_id})>"
+    
 class Digest(Base):
     """Модель для хранения сформированных дайджестов"""
     __tablename__ = "digests"
@@ -38,20 +57,6 @@ class Digest(Base):
         Index('idx_digest_focus', focus_category),
         Index('idx_digest_creation', created_at),
     )
-    def __repr__(self):
-        return f"<Message(id={self.id}, channel='{self.channel}', message_id={self.message_id})>"
-
-
-class Digest(Base):
-    """Модель для хранения сформированных дайджестов"""
-    __tablename__ = "digests"
-    
-    id = Column(Integer, primary_key=True)
-    date = Column(DateTime, nullable=False)
-    text = Column(Text, nullable=False)
-    digest_type = Column(String(20), nullable=False, default="brief")  # Тип дайджеста (brief/detailed)
-    created_at = Column(DateTime, default=datetime.now)
-    
     def __repr__(self):
         return f"<Digest(id={self.id}, date='{self.date}', type='{self.digest_type}')>"
 
