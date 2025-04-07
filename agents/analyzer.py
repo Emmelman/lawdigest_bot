@@ -400,10 +400,13 @@ class AnalyzerAgent:
             "confidence_stats": confidence_stats,
             "reanalyzed_count": updated_count if is_reanalysis else 0
         }
+    # В методе _load_learning_examples в файле agents/analyzer.py:
+
     def _load_learning_examples(self, limit=10):
         """Загружает примеры для улучшения классификации"""
         examples_path = "learning_examples/examples.jsonl"
         if not os.path.exists(examples_path):
+            logger.info("Файл с обучающими примерами не найден")
             return []
         
         examples = []
@@ -413,6 +416,7 @@ class AnalyzerAgent:
                 # Берем последние примеры, ограниченные лимитом
                 for line in lines[-limit:]:
                     examples.append(json.loads(line))
+            logger.info(f"Загружено {len(examples)} обучающих примеров")
             return examples
         except Exception as e:
             logger.error(f"Ошибка при загрузке обучающих примеров: {str(e)}")

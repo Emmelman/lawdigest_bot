@@ -215,6 +215,8 @@ class DigesterAgent:
         Returns:
             str: Текст краткого обзора по категории
         """
+        logger.info(f"Начало генерации краткого обзора для категории '{category}'. Получено {len(messages)} сообщений.")
+    
         if not messages:
             return f"За данный период новостей по категории '{category}' не обнаружено."
         
@@ -222,34 +224,49 @@ class DigesterAgent:
         all_items = []
         
         for msg in messages:
-            # Ищем ссылки в сообщении
-            links = self._extract_links_and_headlines(msg.text)
-            
-            if links:
-                # Если нашли ссылки, добавляем каждую из них
-                for link in links:
-                    all_items.append({
-                        "title": link["title"],
-                        "url": link["url"],
-                        "channel": msg.channel,
-                        "date": msg.date,
-                        "message_id": msg.id,
-                        "has_url": True
-                    })
-            else:
-                # Если ссылок нет, добавляем само сообщение
-                # Используем первую строку или первые 100 символов как заголовок
-                first_line = msg.text.split('\n')[0]
-                title = first_line[:100] + "..." if len(first_line) > 100 else first_line
-                
-                all_items.append({
-                    "title": title,
-                    "url": f"https://t.me/{BOT_USERNAME}?start=msg_{msg.id}",
-                    "channel": msg.channel,
-                    "date": msg.date,
-                    "message_id": msg.id,
-                    "has_url": False  # Отмечаем, что это не настоящая ссылка
-                })
+            try:
+                # Проверяем, что msg - это объект сообщения, а не строка
+                if hasattr(msg, 'text'):
+                    # Ищем ссылки в сообщении
+                    links = self._extract_links_and_headlines(msg.text)
+                    
+                    if links:
+                        # Если нашли ссылки, добавляем каждую из них
+                        for link in links:
+                            all_items.append({
+                                "title": link["title"],
+                                "url": link["url"],
+                                "channel": msg.channel,
+                                "date": msg.date,
+                                "message_id": msg.id,
+                                "has_url": True
+                            })
+                    else:
+                        # Если ссылок нет, добавляем само сообщение
+                        # Используем первую строку или первые 100 символов как заголовок
+                        first_line = msg.text.split('\n')[0]
+                        title = first_line[:100] + "..." if len(first_line) > 100 else first_line
+                        
+                        all_items.append({
+                            "title": title,
+                            "url": f"https://t.me/{BOT_USERNAME}?start=msg_{msg.id}",
+                            "channel": msg.channel,
+                            "date": msg.date,
+                            "message_id": msg.id,
+                            "has_url": False  # Отмечаем, что это не настоящая ссылка
+                        })
+                else:
+                    # Если msg не является объектом сообщения, логируем и пропускаем
+                    logger.warning(f"Элемент в списке сообщений категории '{category}' не является объектом Message: {type(msg)}")
+                    if isinstance(msg, str):
+                        logger.warning(f"Содержимое строки: '{msg}'")
+            except Exception as e:
+                logger.error(f"Ошибка при обработке сообщения для категории '{category}': {str(e)}")
+        
+        # Проверяем, есть ли сообщения после фильтрации
+        if not all_items:
+            logger.warning(f"После фильтрации не осталось сообщений для категории '{category}'")
+            return f"За данный период новостей по категории '{category}' не удалось обработать."
         
         # Сортируем сообщения по дате (сначала самые новые)
         all_items.sort(key=lambda x: x["date"], reverse=True)
@@ -326,8 +343,16 @@ class DigesterAgent:
         Returns:
             str: Текст подробного обзора по категории
         """
+        logger.info(f"Начало генерации подробного обзора для категории '{category}'. Получено {len(messages)} сообщений.")
+        
         if not messages:
+            logger.warning(f"Список сообщений для категории '{category}' пуст")
             return f"За данный период новостей по категории '{category}' не обнаружено."
+        
+        # Логгируем типы первых элементов для отладки
+        logger.info(f"Типы первых 3 элементов в списке сообщений для категории '{category}':")
+        for i, msg in enumerate(messages[:3]):
+            logger.info(f"  Элемент {i}: тип={type(msg)}, атрибуты={dir(msg) if hasattr(msg, '__dict__') else 'Нет атрибутов'}")
         
         # Добавляем иконку к названию категории
         category_icon = self._add_category_icon(category)
@@ -339,16 +364,43 @@ class DigesterAgent:
         
         # Очищаем и нормализуем тексты сообщений
         cleaned_messages = []
-        for msg in messages[:MAX_MESSAGES]:
-            # Сокращаем длинные сообщения
-            message_text = msg.text
-            if len(message_text) > MAX_MESSAGE_LENGTH:
-                message_text = message_text[:MAX_MESSAGE_LENGTH] + "... (текст сокращен)"
-                
-            cleaned_text = self._clean_text_with_links(message_text)
-            cleaned_messages.append(
-                f"Канал: {msg.channel}\nДата: {msg.date.strftime('%d.%m.%Y')}\n\n{cleaned_text}"
-            )
+        for i, msg in enumerate(messages[:MAX_MESSAGES]):
+            try:
+                # Проверяем, что msg - это объект сообщения, а не строка
+                if hasattr(msg, 'text'):
+                    # Сокращаем длинные сообщения
+                    message_text = msg.text
+                    logger.debug(f"Сообщение {i} для категории '{category}': длина текста = {len(message_text)}")
+                    
+                    if len(message_text) > MAX_MESSAGE_LENGTH:
+                        message_text = message_text[:MAX_MESSAGE_LENGTH] + "... (текст сокращен)"
+                        
+                    cleaned_text = self._clean_text_with_links(message_text)
+                    cleaned_messages.append(
+                        f"Канал: {msg.channel}\nДата: {msg.date.strftime('%d.%m.%Y')}\n\n{cleaned_text}"
+                    )
+                else:
+                    # Если msg - не объект сообщения, логируем подробную информацию
+                    logger.error(f"Сообщение {i} для категории '{category}' не имеет атрибута 'text'")
+                    logger.error(f"Тип сообщения: {type(msg)}")
+                    if isinstance(msg, dict):
+                        logger.error(f"Содержимое словаря: {msg}")
+                    elif isinstance(msg, str):
+                        logger.error(f"Содержимое строки: {msg[:100]}")
+                    else:
+                        logger.error(f"Доступные атрибуты: {dir(msg)}")
+                    
+                    # Пытаемся получить строковое представление объекта
+                    logger.error(f"Строковое представление: {str(msg)}")
+            except Exception as e:
+                logger.exception(f"Ошибка при обработке сообщения {i} для категории '{category}': {str(e)}")
+        
+        # Проверяем, остались ли сообщения после фильтрации
+        if not cleaned_messages:
+            logger.warning(f"После фильтрации не осталось сообщений для категории '{category}'")
+            return f"За данный период новостей по категории '{category}' не удалось обработать."
+        
+        logger.info(f"Успешно подготовлено {len(cleaned_messages)} сообщений для категории '{category}'")
         
         # Формируем контекст из очищенных сообщений для LLM
         messages_text = "\n\n---\n\n".join(cleaned_messages)
@@ -368,28 +420,40 @@ class DigesterAgent:
             5. Быть 2-3 абзаца длиной
             """
             
+            logger.info(f"Отправка запроса к LLM для категории '{category}'")
             response = self.llm_model.generate(prompt, max_tokens=1500, temperature=0.7)
+            
             if not response or len(response.strip()) < 50:
+                logger.warning(f"Получен пустой или слишком короткий ответ для категории '{category}'")
                 raise ValueError("Получен пустой или слишком короткий ответ")
+                
+            logger.info(f"Успешно получен ответ для категории '{category}', длина: {len(response)} символов")
             return response
             
         except Exception as e:
-            logger.error(f"Ошибка при генерации подробного обзора по категории '{category}': {str(e)}")
+            logger.error(f"Ошибка при генерации подробного обзора по категории '{category}': {str(e)}", exc_info=True)
             
             # Создаем базовый обзор на основе имеющихся сообщений
             fallback_text = f"Обзор новостей категории '{category}':\n\n"
             for i, msg in enumerate(messages[:5]):
-                channel_name = msg.channel
-                date_str = msg.date.strftime("%d.%m.%Y")
-                
-                # Извлекаем заголовок сообщения или первую строку
-                lines = msg.text.split('\n')
-                title = lines[0][:100]
-                if len(title) == 100:
-                    title += "..."
-                    
-                fallback_text += f"**{i+1}.** {title} (Источник: {channel_name}, {date_str})\n\n"
+                try:
+                    if hasattr(msg, 'channel') and hasattr(msg, 'date') and hasattr(msg, 'text'):
+                        channel_name = msg.channel
+                        date_str = msg.date.strftime("%d.%m.%Y")
+                        
+                        # Извлекаем заголовок сообщения или первую строку
+                        lines = msg.text.split('\n')
+                        title = lines[0][:100]
+                        if len(title) == 100:
+                            title += "..."
+                            
+                        fallback_text += f"**{i+1}.** {title} (Источник: {channel_name}, {date_str})\n\n"
+                    else:
+                        logger.warning(f"Пропуск сообщения {i} при создании резервного текста - нет необходимых атрибутов")
+                except Exception as inner_e:
+                    logger.error(f"Ошибка при формировании резервного текста для сообщения {i}: {str(inner_e)}")
             
+            logger.info(f"Создан резервный текст для категории '{category}', длина: {len(fallback_text)} символов")
             return fallback_text
 
     def _generate_digest_intro(self, date, total_messages, categories_count, is_brief=True, days_back=1):
@@ -440,16 +504,22 @@ class DigesterAgent:
             else:
                 intro_text += "\n\n*Подробная версия дайджеста.*"
             return intro_text
+    
     def _process_categories_parallel(self, categories_to_process, messages_by_category, digest_type):
         """
         Параллельная обработка секций дайджеста
         """
         results = {}
         
+        logger.info(f"Начало параллельной обработки {len(categories_to_process)} категорий для типа дайджеста '{digest_type}'")
+        for category in categories_to_process:
+            logger.info(f"Категория '{category}': {len(messages_by_category[category])} сообщений")
+        
         with ThreadPoolExecutor(max_workers=min(4, len(categories_to_process))) as executor:
             future_to_category = {}
             
             for category in categories_to_process:
+                logger.info(f"Отправка задачи на обработку категории '{category}'")
                 if digest_type == "brief":
                     future = executor.submit(
                         self._generate_brief_section, category, messages_by_category[category]
@@ -463,11 +533,14 @@ class DigesterAgent:
             for future in as_completed(future_to_category):
                 category = future_to_category[future]
                 try:
+                    logger.info(f"Получение результата для категории '{category}'")
                     section_text = future.result()
                     results[category] = section_text
+                    logger.info(f"Успешно обработана категория '{category}', длина текста: {len(section_text)} символов")
                 except Exception as e:
-                    logger.error(f"Ошибка при обработке категории {category}: {str(e)}")
+                    logger.error(f"Ошибка при обработке категории '{category}': {str(e)}", exc_info=True)
         
+        logger.info(f"Завершена параллельная обработка категорий. Обработано {len(results)} из {len(categories_to_process)}")
         return results
 
     def create_digest(self, date=None, days_back=1, digest_type="both", 
@@ -489,14 +562,56 @@ class DigesterAgent:
         Returns:
             dict: Результаты создания дайджеста
         """
-        # Определяем даты
+       # Определяем даты
         end_date = date or datetime.now()
         start_date = end_date - timedelta(days=days_back-1)
         
         logger.info(f"Создание дайджеста за период с {start_date.strftime('%Y-%m-%d')} по {end_date.strftime('%Y-%m-%d')}, тип: {digest_type}")
+         # Здесь вставляется предложенный код для проверки существующих дайджестов
+        # При сохранении проверяем, есть ли уже дайджест за этот период
+        brief_digest_id = digest_id if digest_type == "brief" else None
+        detailed_digest_id = digest_id if digest_type == "detailed" else None
+        
+        if update_existing and not digest_id:
+            # Ищем существующий дайджест для этого периода и типа
+            if digest_type in ["brief", "both"]:
+                existing_digests = self.db_manager.find_digests_by_parameters(
+                    digest_type="brief",
+                    date_range_start=start_date,
+                    date_range_end=end_date,
+                    focus_category=focus_category,
+                    limit=1
+                )
+                
+                if existing_digests:
+                    # Используем ID существующего дайджеста
+                    brief_digest_id = existing_digests[0]['id']
+                    logger.info(f"Найден существующий краткий дайджест (ID: {brief_digest_id}), он будет обновлен")
+            
+            if digest_type in ["detailed", "both"]:
+                existing_detailed = self.db_manager.find_digests_by_parameters(
+                    digest_type="detailed",
+                    date_range_start=start_date,
+                    date_range_end=end_date,
+                    focus_category=focus_category,
+                    limit=1
+                )
+                
+                if existing_detailed:
+                    # Используем ID существующего подробного дайджеста
+                    detailed_digest_id = existing_detailed[0]['id']
+                    logger.info(f"Найден существующий подробный дайджест (ID: {detailed_digest_id}), он будет обновлен")
         
         # Получаем сообщения с применением расширенных фильтров
-        messages = self.db_manager.get_filtered_messages(
+        filter_result = self.db_manager.get_filtered_messages(
+            start_date=start_date,
+            end_date=end_date,
+            category=focus_category,
+            channels=channels,
+            keywords=keywords
+        )
+        # Получаем сообщения с применением расширенных фильтров
+        filter_result = self.db_manager.get_filtered_messages(
             start_date=start_date,
             end_date=end_date,
             category=focus_category,
@@ -504,12 +619,30 @@ class DigesterAgent:
             keywords=keywords
         )
         
-        # Если сообщений нет, возвращаем ошибку
+        # Извлекаем список сообщений из результата
+        if isinstance(filter_result, dict) and "messages" in filter_result:
+            messages = filter_result["messages"]
+            logger.info(f"Получено {len(messages)} сообщений из {filter_result.get('total', 0)} доступных")
+        else:
+            messages = filter_result  # На случай, если формат возврата изменится
+            logger.info(f"Получено {len(messages)} сообщений (прямой результат)")
+        
+        # Если сообщений нет, проверим все сообщения за указанный период без фильтров
         if not messages:
-            return {
-                "status": "no_messages",
-                "message": "Нет сообщений, соответствующих критериям фильтрации"
-            }
+            logger.warning("Не найдено сообщений с указанными фильтрами, пробуем получить все сообщения за период")
+            
+            # Пробуем получить любые сообщения за этот период
+            all_messages = self.db_manager.get_messages_by_date_range(start_date, end_date)
+            
+            if all_messages:
+                logger.info(f"Найдено {len(all_messages)} сообщений без применения фильтров")
+                messages = all_messages
+            else:
+                logger.error("Сообщения за указанный период не найдены даже без фильтров")
+                return {
+                    "status": "no_messages",
+                    "message": "Нет сообщений, соответствующих критериям фильтрации"
+                }
         
         # Группируем сообщения по категориям
         messages_by_category = {}
@@ -518,7 +651,11 @@ class DigesterAgent:
         total_messages = 0
         
         for msg in messages:
-            category = msg.category if hasattr(msg, 'category') else "другое"
+            if not hasattr(msg, 'category') or not hasattr(msg, 'text'):
+                logger.warning(f"Пропуск объекта, не являющегося сообщением: {type(msg)}")
+                continue
+                
+            category = msg.category if msg.category else "другое"
             if category not in messages_by_category:
                 messages_by_category[category] = []
             messages_by_category[category].append(msg)
@@ -530,6 +667,23 @@ class DigesterAgent:
             
             total_messages += 1
         
+        # Если после фильтрации не осталось сообщений
+        if total_messages == 0:
+            logger.error("После группировки по категориям не осталось подходящих сообщений")
+            return {
+                "status": "no_messages",
+                "message": "Нет подходящих сообщений для формирования дайджеста"
+            }
+
+        # В методе create_digest добавьте следующий код после группировки сообщений по категориям:
+
+        logger.info(f"Группировка сообщений по категориям завершена. Всего категорий: {len(messages_by_category)}")
+        for category, msgs in messages_by_category.items():
+            logger.info(f"Категория '{category}': {len(msgs)} сообщений")
+            # Проверяем типы первых трех элементов для отладки
+            for i, msg in enumerate(msgs[:3]):
+                logger.info(f"  Сообщение {i} для '{category}': тип={type(msg)}, имеет атрибут 'text'={hasattr(msg, 'text')}")
+
         # Формируем секции дайджеста в зависимости от типа
         brief_sections = {}
         detailed_sections = {}

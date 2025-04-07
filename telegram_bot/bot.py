@@ -201,8 +201,8 @@ class TelegramBot:
     
     async def list_digests_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /list - список доступных дайджестов"""
-        # Получаем последние 5 дайджестов
-        digests = self.db_manager.find_digests_by_parameters(limit=5)
+        # Получаем последние 10 дайджестов (вместо 5)
+        digests = self.db_manager.find_digests_by_parameters(limit=10)
         
         if not digests:
             await update.message.reply_text("Дайджесты еще не сформированы.")
@@ -210,11 +210,15 @@ class TelegramBot:
         
         keyboard = []
         for digest in digests:
-            # Формируем описание дайджеста
+            # Формируем описание дайджеста с большим количеством деталей
             if digest["date_range_start"] and digest["date_range_end"]:
-                start_date = digest["date_range_start"].strftime("%d.%m.%Y")
-                end_date = digest["date_range_end"].strftime("%d.%m.%Y")
-                date_text = f"{start_date} - {end_date}"
+                days_diff = (digest["date_range_end"] - digest["date_range_start"]).days
+                if days_diff > 0:
+                    start_date = digest["date_range_start"].strftime("%d.%m.%Y")
+                    end_date = digest["date_range_end"].strftime("%d.%m.%Y")
+                    date_text = f"{start_date} - {end_date} ({days_diff+1} дн.)"
+                else:
+                    date_text = digest["date"].strftime("%d.%m.%Y")
             else:
                 date_text = digest["date"].strftime("%d.%m.%Y")
             
@@ -223,7 +227,12 @@ class TelegramBot:
             if digest["focus_category"]:
                 focus_text = f" - {digest['focus_category']}"
             
-            button_text = f"{date_text}{focus_text} ({digest['digest_type']})"
+            # Добавляем время создания
+            created_at = ""
+            if digest.get("created_at"):
+                created_at = f" ({digest['created_at'].strftime('%H:%M')})"
+            
+            button_text = f"{date_text}{focus_text} ({digest['digest_type']}){created_at}"
             keyboard.append([
                 InlineKeyboardButton(button_text, callback_data=f"show_digest_{digest['id']}")
             ])
@@ -276,6 +285,7 @@ class TelegramBot:
                     "Выберите категорию для формирования фокусированного дайджеста:", 
                     reply_markup=reply_markup
                 )
+            
             elif action == "channels":
                 # Выбор каналов для фильтрации
                 keyboard = []
@@ -283,17 +293,31 @@ class TelegramBot:
                     display_name = channel
                     if channel.startswith("@"):
                         display_name = channel[1:]
-                    keyboard.append([
+                        keyboard.append([
                         InlineKeyboardButton(
                             display_name, callback_data=f"gen_digest_chan_{channel}"
                         )
                     ])
+                        
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 await query.message.reply_text(
                     "Выберите канал для формирования дайджеста:", 
                     reply_markup=reply_markup
                 )
-        
+        # В методе button_callback, для ветки обработки каналов:
+        elif query.data.startswith("gen_digest_chan_"):
+            channel = query.data.replace("gen_digest_chan_", "")
+            
+            # Запрашиваем период для канала
+            context.user_data["focus_channel"] = channel
+            # Сохраняем каналы в списке, а не просто строкой
+            context.user_data["channels"] = [channel]
+            await query.message.reply_text(
+                f"Выбран канал: {channel}\n"
+                "Теперь укажите период в формате ДД.ММ.ГГГГ или ДД.ММ.ГГГГ-ДД.ММ.ГГГГ, "
+                "или напишите 'сегодня' или 'вчера'"
+            )
+            context.user_data["awaiting_channel_period"] = True
         # Обработка выбора категории для фокуса
         elif query.data.startswith("gen_digest_cat_"):
             category = query.data.replace("gen_digest_cat_", "")
@@ -368,8 +392,9 @@ class TelegramBot:
                 for chunk in chunks:
                     await query.message.reply_text(chunk, parse_mode='HTML')
     
+    # В файле telegram_bot/bot.py
     async def _handle_digest_generation(self, query, start_date, end_date, description, 
-                                       focus_category=None, channels=None, keywords=None):
+                                   focus_category=None, channels=None, keywords=None):
         """
         Запуск процесса генерации дайджеста с параметрами
         """
@@ -384,17 +409,66 @@ class TelegramBot:
         
         # Запускаем генерацию в отдельном потоке
         import threading
-        from agents.digester import DigesterAgent
         
         def generate_and_notify():
             try:
-                # Создаем агент для дайджеста
+                # Этот код внутри функции, поэтому self, query и т.д. доступны из окружения
+                from agents.digester import DigesterAgent
+                from agents.data_collector import DataCollectorAgent
+                from agents.analyzer import AnalyzerAgent
+                
+                # Создаем агенты
+                collector = DataCollectorAgent(self.db_manager)
+                analyzer = AnalyzerAgent(self.db_manager)
                 digester = DigesterAgent(self.db_manager, self.llm_model)
                 
                 # Вычисляем количество дней
                 days_back = (end_date - start_date).days + 1
                 
-                # Запускаем генерацию
+                # Отправляем сообщение через прокси-функцию
+                self._send_sync_message(query.message.chat_id, 
+                    f"Собираем данные за последние {days_back} дней...")
+                
+                # Запускаем сбор данных
+                import asyncio
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                collect_result = loop.run_until_complete(
+                    collector._collect_all_channels_parallel(days_back=days_back)
+                )
+                
+                total_messages = sum(collect_result.values())
+                self._send_sync_message(query.message.chat_id, 
+                    f"Собрано {total_messages} новых сообщений")
+                
+                # Запускаем анализ сообщений
+                self._send_sync_message(query.message.chat_id, 
+                    "Выполняем анализ и категоризацию сообщений...")
+                
+                from agents.analyzer import AnalyzerAgent
+                analyzer = AnalyzerAgent(self.db_manager)
+                analyzer.fast_check = True  # Включаем быструю проверку критиком
+                analyze_result = analyzer.analyze_messages(limit=200)  # увеличиваем лимит
+                
+                # Запускаем критика для всех сообщений с низкой уверенностью
+                self._send_sync_message(query.message.chat_id, 
+                    "Проверяем сообщения с низкой уверенностью...")
+
+                from agents.critic import CriticAgent
+                critic = CriticAgent(self.db_manager)
+                review_result = critic.review_recent_categorizations(
+                    confidence_threshold=2,  # Проверять сообщения с уверенностью <= 2
+                    limit=50
+                )
+
+                self._send_sync_message(query.message.chat_id, 
+                    f"Проверка завершена. Проверено: {review_result.get('total', 0)}, "
+                    f"обновлено: {review_result.get('updated', 0)} сообщений.")
+
+                # Запускаем генерацию дайджеста
+                self._send_sync_message(query.message.chat_id, 
+                    "Формируем дайджест...")
+                
                 result = digester.create_digest(
                     date=end_date,
                     days_back=days_back,
@@ -406,32 +480,48 @@ class TelegramBot:
                 
                 # Проверяем результат
                 if result.get("status") == "no_messages":
-                    self.application.create_task(
-                        query.message.reply_text(
-                            "Не найдено сообщений, соответствующих критериям фильтрации."
-                        )
-                    )
+                    self._send_sync_message(query.message.chat_id, 
+                        "Не найдено сообщений, соответствующих критериям фильтрации.")
                     return
                 
                 # Отправляем уведомление об успешной генерации
-                self.application.create_task(
-                    query.message.reply_text(
-                        f"Дайджест {description} успешно сгенерирован!\n"
-                        "Используйте команду /list для просмотра доступных дайджестов."
-                    )
-                )
+                self._send_sync_message(query.message.chat_id, 
+                    f"Дайджест {description} успешно сгенерирован!\n"
+                    "Используйте команду /list для просмотра доступных дайджестов.")
+                
             except Exception as e:
-                logger.error(f"Ошибка при генерации дайджеста: {str(e)}")
-                self.application.create_task(
-                    query.message.reply_text(
-                        f"Произошла ошибка при генерации дайджеста: {str(e)}"
-                    )
-                )
+                import traceback
+                tb = traceback.format_exc()
+                logger.error(f"Ошибка при генерации дайджеста: {str(e)}\n{tb}")
+                self._send_sync_message(query.message.chat_id, 
+                    f"Произошла ошибка при генерации дайджеста: {str(e)}")
         
         # Запускаем в отдельном потоке
         thread = threading.Thread(target=generate_and_notify)
         thread.daemon = True
         thread.start()
+
+    # Этот метод должен быть на уровне класса, а не внутри другого метода
+    def _send_sync_message(self, chat_id, text):
+        """Синхронная отправка сообщения через requests"""
+        import requests
+        
+        token = TELEGRAM_BOT_TOKEN
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        data = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML"
+        }
+        
+        try:
+            response = requests.post(url, data=data)
+            response.raise_for_status()
+            logger.info(f"Сообщение отправлено: {text[:30]}...")
+        except Exception as e:
+            logger.error(f"Ошибка при отправке сообщения: {str(e)}")
+            
+            
     
     async def _show_digest_by_id(self, message, digest_id):
         """
@@ -698,7 +788,10 @@ class TelegramBot:
         ]
         
         # Настраиваем обработчики команд
-        asyncio.run(self.setup_commands())
+        # Заменяем вызов asyncio.run() на более надежный метод создания event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(self.setup_commands())
         
         # Используем job queue для установки команд при запуске
         async def setup_commands_job(context):

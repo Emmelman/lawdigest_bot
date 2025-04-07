@@ -787,49 +787,63 @@ class DatabaseManager:
                          channels=None, keywords=None, page=1, page_size=100):
         """
         Получение сообщений с расширенной фильтрацией и пагинацией
-        
-        Args:
-            start_date (datetime): Начальная дата
-            end_date (datetime): Конечная дата
-            category (str, optional): Категория для фильтрации
-            channels (list, optional): Список каналов для фильтрации
-            keywords (list, optional): Ключевые слова для фильтрации
-            page (int): Номер страницы
-            page_size (int): Размер страницы
-            
-        Returns:
-            dict: Сообщения и информация о пагинации
         """
         from sqlalchemy import or_
         
         session = self.Session()
         try:
+            logger.info(f"Запрос сообщений с {start_date.strftime('%Y-%m-%d')} по {end_date.strftime('%Y-%m-%d')}")
+            logger.info(f"Фильтры: категория='{category}', каналы={channels}, ключевые слова={keywords}")
+            
+            # Преобразуем даты в datetime.datetime если они строки или date
+            if isinstance(start_date, str):
+                start_date = datetime.strptime(start_date, "%Y-%m-%d")
+            elif hasattr(start_date, 'date') and callable(getattr(start_date, 'date')):
+                # Если это date, преобразуем в datetime с временем 00:00:00
+                start_date = datetime.combine(start_date, datetime.min.time())
+            
+            if isinstance(end_date, str):
+                end_date = datetime.strptime(end_date, "%Y-%m-%d")
+            elif hasattr(end_date, 'date') and callable(getattr(end_date, 'date')):
+                # Если это date, преобразуем в datetime с временем 23:59:59
+                end_date = datetime.combine(end_date, datetime.max.time())
+            
             query = session.query(Message).filter(
                 Message.date >= start_date,
                 Message.date <= end_date
             )
             
+            # Логируем количество сообщений после фильтрации по дате
+            date_count = query.count()
+            logger.info(f"Найдено {date_count} сообщений в указанном диапазоне дат")
+            
             if category:
                 query = query.filter(Message.category == category)
+                logger.info(f"После фильтрации по категории '{category}': {query.count()} сообщений")
             
             if channels:
                 query = query.filter(Message.channel.in_(channels))
+                logger.info(f"После фильтрации по каналам: {query.count()} сообщений")
             
             if keywords:
-            # Создаем условия поиска для каждого ключевого слова
+                # Создаем условия поиска для каждого ключевого слова
                 keyword_conditions = []
                 for keyword in keywords:
                     keyword_conditions.append(Message.text.ilike(f'%{keyword}%'))
                 
                 # Объединяем условия через OR
                 query = query.filter(or_(*keyword_conditions))
+                logger.info(f"После фильтрации по ключевым словам: {query.count()} сообщений")
         
             # Получаем общее количество записей для пагинации
             total = query.count()
+            logger.info(f"Всего сообщений после всех фильтров: {total}")
             
             # Применяем пагинацию
             offset = (page - 1) * page_size
             messages = query.order_by(Message.date.desc()).offset(offset).limit(page_size).all()
+            
+            logger.info(f"Получено {len(messages)} сообщений после пагинации")
             
             # Формируем результат
             return {
@@ -840,8 +854,22 @@ class DatabaseManager:
                 "total_pages": (total + page_size - 1) // page_size
             }
         except Exception as e:
-            logger.error(f"Ошибка при получении отфильтрованных сообщений: {str(e)}")
+            logger.error(f"Ошибка при получении отфильтрованных сообщений: {str(e)}", exc_info=True)
             return {"messages": [], "total": 0, "page": page, "page_size": page_size, "total_pages": 0}
         finally:
-            session.close()                               
+            session.close()
+    def get_latest_messages(self, limit=100):
+        """
+        Получение последних сообщений без сложной фильтрации
+        """
+        session = self.Session()
+        try:
+            messages = session.query(Message).order_by(Message.date.desc()).limit(limit).all()
+            logger.info(f"Получено {len(messages)} последних сообщений")
+            return messages
+        except Exception as e:
+            logger.error(f"Ошибка при получении последних сообщений: {str(e)}")
+            return []
+        finally:
+            session.close()                                       
                        
