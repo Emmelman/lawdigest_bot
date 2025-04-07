@@ -6,7 +6,7 @@ import logging
 import re
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
-
+import asyncio
 from telegram.ext import (
     Application, 
     CommandHandler, 
@@ -15,33 +15,29 @@ from telegram.ext import (
     ContextTypes, 
     filters
 )
+from config.settings import TELEGRAM_BOT_TOKEN, CATEGORIES, BOT_USERNAME, TELEGRAM_CHANNELS
 
-from config.settings import TELEGRAM_BOT_TOKEN, CATEGORIES, BOT_USERNAME
 from database.db_manager import DatabaseManager
 from llm.gemma_model import GemmaLLM
 
 logger = logging.getLogger(__name__)
 
 class TelegramBot:
-    """Класс для управления Telegram-ботом"""
-    
-    def __init__(self, db_manager, llm_model=None):
+    def __init__(self, db_manager, llm_model=None): 
         """
         Инициализация бота
-        
-        Args:
-            db_manager (DatabaseManager): Менеджер БД
-            llm_model (GemmaLLM, optional): Модель для ответов на вопросы
         """
         self.db_manager = db_manager
         self.llm_model = llm_model or GemmaLLM()
         self.application = None
         self.menu_commands = [
-        ("digest", "Краткий дайджест новостей"),
-        ("detail", "Подробный дайджест"),
-        ("cat", "Выбрать категорию новостей"),
-        ("date", "Дайджест за дату (формат: дд.мм.гггг)"),
-        ("help", "Справка")
+            ("digest", "Краткий дайджест новостей"),
+            ("detail", "Подробный дайджест"),
+            ("cat", "Выбрать категорию новостей"),
+            ("date", "Дайджест за дату (формат: дд.мм.гггг)"),
+            ("generate", "Сгенерировать новый дайджест"),
+            ("list", "Список доступных дайджестов"),
+            ("help", "Справка")
         ]
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /start"""
@@ -187,14 +183,150 @@ class TelegramBot:
             "Выберите категорию и тип обзора:", 
             reply_markup=reply_markup
         )
+    async def generate_digest_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /generate - запуск генерации дайджеста"""
+        keyboard = [
+            [InlineKeyboardButton("За сегодня", callback_data="gen_digest_today")],
+            [InlineKeyboardButton("За вчера", callback_data="gen_digest_yesterday")],
+            [InlineKeyboardButton("За период", callback_data="gen_digest_range")],
+            [InlineKeyboardButton("С фокусом на категорию", callback_data="gen_digest_category")],
+            [InlineKeyboardButton("С фильтрацией по каналам", callback_data="gen_digest_channels")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "Выберите тип дайджеста для генерации:", 
+            reply_markup=reply_markup
+        )
     
+    async def list_digests_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /list - список доступных дайджестов"""
+        # Получаем последние 5 дайджестов
+        digests = self.db_manager.find_digests_by_parameters(limit=5)
+        
+        if not digests:
+            await update.message.reply_text("Дайджесты еще не сформированы.")
+            return
+        
+        keyboard = []
+        for digest in digests:
+            # Формируем описание дайджеста
+            if digest["date_range_start"] and digest["date_range_end"]:
+                start_date = digest["date_range_start"].strftime("%d.%m.%Y")
+                end_date = digest["date_range_end"].strftime("%d.%m.%Y")
+                date_text = f"{start_date} - {end_date}"
+            else:
+                date_text = digest["date"].strftime("%d.%m.%Y")
+            
+            # Добавляем информацию о фокусе, если есть
+            focus_text = ""
+            if digest["focus_category"]:
+                focus_text = f" - {digest['focus_category']}"
+            
+            button_text = f"{date_text}{focus_text} ({digest['digest_type']})"
+            keyboard.append([
+                InlineKeyboardButton(button_text, callback_data=f"show_digest_{digest['id']}")
+            ])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "Выберите дайджест для просмотра:", 
+            reply_markup=reply_markup
+        )
     async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    
         """Обработчик нажатий на кнопки"""
         query = update.callback_query
         await query.answer()
         
-        # Обработка категорий
-        if query.data.startswith("cat_"):
+        # Обработка запросов на генерацию дайджеста
+        if query.data.startswith("gen_digest_"):
+            action = query.data.replace("gen_digest_", "")
+            
+            if action == "today":
+                # Генерация за сегодня
+                today = datetime.now()
+                await self._handle_digest_generation(
+                    query, today, today, "За сегодня"
+                )
+            elif action == "yesterday":
+                # Генерация за вчера
+                yesterday = datetime.now() - timedelta(days=1)
+                await self._handle_digest_generation(
+                    query, yesterday, yesterday, "За вчера"
+                )
+            elif action == "range":
+                # Запрашиваем диапазон дат
+                context.user_data["awaiting_date_range"] = True
+                await query.message.reply_text(
+                    "Укажите диапазон дат в формате ДД.ММ.ГГГГ-ДД.ММ.ГГГГ, например: 01.04.2025-07.04.2025"
+                )
+            elif action == "category":
+                # Выбор категории для фокуса
+                keyboard = []
+                for category in CATEGORIES + ["другое"]:
+                    keyboard.append([
+                        InlineKeyboardButton(
+                            category, callback_data=f"gen_digest_cat_{category}"
+                        )
+                    ])
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await query.message.reply_text(
+                    "Выберите категорию для формирования фокусированного дайджеста:", 
+                    reply_markup=reply_markup
+                )
+            elif action == "channels":
+                # Выбор каналов для фильтрации
+                keyboard = []
+                for channel in TELEGRAM_CHANNELS:
+                    display_name = channel
+                    if channel.startswith("@"):
+                        display_name = channel[1:]
+                    keyboard.append([
+                        InlineKeyboardButton(
+                            display_name, callback_data=f"gen_digest_chan_{channel}"
+                        )
+                    ])
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await query.message.reply_text(
+                    "Выберите канал для формирования дайджеста:", 
+                    reply_markup=reply_markup
+                )
+        
+        # Обработка выбора категории для фокуса
+        elif query.data.startswith("gen_digest_cat_"):
+            category = query.data.replace("gen_digest_cat_", "")
+            
+            # Запрашиваем период для категории
+            context.user_data["focus_category"] = category
+            await query.message.reply_text(
+                f"Выбрана категория: {category}\n"
+                "Теперь укажите период в формате ДД.ММ.ГГГГ или ДД.ММ.ГГГГ-ДД.ММ.ГГГГ, "
+                "или напишите 'сегодня' или 'вчера'"
+            )
+            context.user_data["awaiting_category_period"] = True
+        
+        # Обработка выбора канала для фильтрации
+        elif query.data.startswith("gen_digest_chan_"):
+            channel = query.data.replace("gen_digest_chan_", "")
+            
+            # Запрашиваем период для канала
+            context.user_data["focus_channel"] = channel
+            await query.message.reply_text(
+                f"Выбран канал: {channel}\n"
+                "Теперь укажите период в формате ДД.ММ.ГГГГ или ДД.ММ.ГГГГ-ДД.ММ.ГГГГ, "
+                "или напишите 'сегодня' или 'вчера'"
+            )
+            context.user_data["awaiting_channel_period"] = True
+        
+        # Обработка просмотра дайджеста из списка
+        elif query.data.startswith("show_digest_"):
+            digest_id = int(query.data.replace("show_digest_", ""))
+            await self._show_digest_by_id(query.message, digest_id)
+        
+        # Существующая обработка категорий
+        elif query.data.startswith("cat_"):
             # Формат: cat_[тип]_[категория]
             parts = query.data.split("_", 2)
             if len(parts) == 3:
@@ -236,6 +368,113 @@ class TelegramBot:
                 for chunk in chunks:
                     await query.message.reply_text(chunk, parse_mode='HTML')
     
+    async def _handle_digest_generation(self, query, start_date, end_date, description, 
+                                       focus_category=None, channels=None, keywords=None):
+        """
+        Запуск процесса генерации дайджеста с параметрами
+        """
+        await query.message.reply_text(
+            f"Запущена генерация дайджеста {description}.\n"
+            f"Период: с {start_date.strftime('%d.%m.%Y')} по {end_date.strftime('%d.%m.%Y')}\n"
+            f"{'Фокус на категории: ' + focus_category if focus_category else ''}\n"
+            f"{'Каналы: ' + ', '.join(channels) if channels else ''}\n"
+            f"{'Ключевые слова: ' + ', '.join(keywords) if keywords else ''}\n\n"
+            "Это может занять несколько минут..."
+        )
+        
+        # Запускаем генерацию в отдельном потоке
+        import threading
+        from agents.digester import DigesterAgent
+        
+        def generate_and_notify():
+            try:
+                # Создаем агент для дайджеста
+                digester = DigesterAgent(self.db_manager, self.llm_model)
+                
+                # Вычисляем количество дней
+                days_back = (end_date - start_date).days + 1
+                
+                # Запускаем генерацию
+                result = digester.create_digest(
+                    date=end_date,
+                    days_back=days_back,
+                    digest_type="both",
+                    focus_category=focus_category,
+                    channels=channels,
+                    keywords=keywords
+                )
+                
+                # Проверяем результат
+                if result.get("status") == "no_messages":
+                    self.application.create_task(
+                        query.message.reply_text(
+                            "Не найдено сообщений, соответствующих критериям фильтрации."
+                        )
+                    )
+                    return
+                
+                # Отправляем уведомление об успешной генерации
+                self.application.create_task(
+                    query.message.reply_text(
+                        f"Дайджест {description} успешно сгенерирован!\n"
+                        "Используйте команду /list для просмотра доступных дайджестов."
+                    )
+                )
+            except Exception as e:
+                logger.error(f"Ошибка при генерации дайджеста: {str(e)}")
+                self.application.create_task(
+                    query.message.reply_text(
+                        f"Произошла ошибка при генерации дайджеста: {str(e)}"
+                    )
+                )
+        
+        # Запускаем в отдельном потоке
+        thread = threading.Thread(target=generate_and_notify)
+        thread.daemon = True
+        thread.start()
+    
+    async def _show_digest_by_id(self, message, digest_id):
+        """
+        Показывает дайджест по его ID
+        """
+        # Получаем дайджест с секциями
+        digest = self.db_manager.get_digest_by_id_with_sections(digest_id)
+        
+        if not digest:
+            await message.reply_text("Дайджест не найден.")
+            return
+        
+        # Очищаем текст от проблемных символов
+        safe_text = self._clean_markdown_text(digest["text"])
+        
+        # Отправляем дайджест по частям
+        chunks = self._split_text(safe_text)
+        
+        # Формируем заголовок в зависимости от параметров дайджеста
+        header = f"Дайджест за {digest['date'].strftime('%d.%m.%Y')}"
+        
+        if digest.get("date_range_start") and digest.get("date_range_end"):
+            start_date = digest["date_range_start"].strftime("%d.%m.%Y")
+            end_date = digest["date_range_end"].strftime("%d.%m.%Y")
+            if start_date != end_date:
+                header = f"Дайджест за период с {start_date} по {end_date}"
+        
+        if digest.get("focus_category"):
+            header += f" (фокус: {digest['focus_category']})"
+            
+        if digest.get("digest_type"):
+            header += f" - {digest['digest_type']}"
+        
+        for i, chunk in enumerate(chunks):
+            if i == 0:
+                text_html = self._convert_to_html(chunk)
+                await message.reply_text(
+                    f"{header}\n\n{text_html}",
+                    parse_mode='HTML'
+                )
+            else:
+                await message.reply_text(chunk, parse_mode='HTML')
+
     async def message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик текстовых сообщений"""
         user_message = update.message.text
@@ -427,32 +666,39 @@ class TelegramBot:
         text = re.sub(r'\\([.()[\]{}])', r'\1', text)  # \.() -> .()
         
         return text
-
+    async def setup_commands(self):
+        """Регистрация обработчиков команд"""
+        self.application.add_handler(CommandHandler("start", self.start_command))
+        self.application.add_handler(CommandHandler("help", self.help_command))
+        self.application.add_handler(CommandHandler("digest", self.digest_command))
+        self.application.add_handler(CommandHandler("brief", self.digest_command))
+        self.application.add_handler(CommandHandler("digest_detailed", self.digest_detailed_command))
+        self.application.add_handler(CommandHandler("detail", self.digest_detailed_command))
+        self.application.add_handler(CommandHandler("category", self.category_command))
+        self.application.add_handler(CommandHandler("cat", self.category_command))
+        self.application.add_handler(CommandHandler("date", self.date_command))
+        
+        # Новые команды
+        self.application.add_handler(CommandHandler("generate", self.generate_digest_command))
+        self.application.add_handler(CommandHandler("gen", self.generate_digest_command))
+        self.application.add_handler(CommandHandler("list", self.list_digests_command))
+        
+        self.application.add_handler(CallbackQueryHandler(self.button_callback))
+        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.message_handler))
     def run(self):
         """Запуск бота"""
         logger.info("Запуск Telegram-бота")
         
         # Создаем приложение
         self.application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        
         # Настраиваем команды для меню бота
         commands = [
-        BotCommand(command, description) for command, description in self.menu_commands
+            BotCommand(command, description) for command, description in self.menu_commands
         ]
-        # Регистрируем обработчики
-        self.application.add_handler(CommandHandler("start", self.start_command))
-        self.application.add_handler(CommandHandler("help", self.help_command))
-        self.application.add_handler(CommandHandler("digest", self.digest_command))
-        # Добавьте альтернативную короткую команду для краткого дайджеста
-        self.application.add_handler(CommandHandler("brief", self.digest_command))  
-        self.application.add_handler(CommandHandler("digest_detailed", self.digest_detailed_command))
-        # Добавьте альтернативную короткую команду для подробного дайджеста
-        self.application.add_handler(CommandHandler("detail", self.digest_detailed_command))
-        # Добавьте короткую команду для категорий
-        self.application.add_handler(CommandHandler("category", self.category_command))
-        self.application.add_handler(CommandHandler("cat", self.category_command))
-        self.application.add_handler(CommandHandler("date", self.date_command))
-        self.application.add_handler(CallbackQueryHandler(self.button_callback))
-        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.message_handler))
+        
+        # Настраиваем обработчики команд
+        asyncio.run(self.setup_commands())
         
         # Используем job queue для установки команд при запуске
         async def setup_commands_job(context):
@@ -465,3 +711,5 @@ class TelegramBot:
         self.application.run_polling()
         
         return self.application
+        
+    

@@ -120,3 +120,39 @@ class GemmaLLM:
         except requests.exceptions.RequestException as e:
             logger.error(f"Ошибка API запроса: {str(e)}")
             raise
+    # В GemmaLLM и QwenLLM:
+    def _get_cached_response(self, prompt, max_tokens, temperature):
+        """Получение ответа из кэша с учетом типа запроса"""
+        cache_key = hashlib.md5((prompt + f"_tokens{max_tokens}_temp{temperature}").encode()).hexdigest()
+        cache_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'llm_cache')
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_file = os.path.join(cache_dir, f"{cache_key}.txt")
+        
+        if os.path.exists(cache_file):
+            file_age = time.time() - os.path.getmtime(cache_file)
+            
+            # Определяем TTL в зависимости от типа запроса
+            cache_ttl = 86400  # 24 часа по умолчанию
+            
+            # Для классификации более длительное хранение
+            if "классифицировать" in prompt.lower() or "категори" in prompt.lower():
+                cache_ttl = 604800  # 7 дней
+            
+            # Для дайджестов более короткое хранение
+            if "дайджест" in prompt.lower() or "новост" in prompt.lower():
+                cache_ttl = 43200  # 12 часов
+                
+            # Для длинных запросов еще более короткое хранение
+            if len(prompt) > 5000:
+                cache_ttl = 21600  # 6 часов
+                
+            if file_age < cache_ttl:
+                try:
+                    with open(cache_file, 'r', encoding='utf-8') as f:
+                        cached_response = f.read()
+                        logger.debug(f"Использован кэш для промпта (хэш: {cache_key[:8]}...)")
+                        return cached_response, True
+                except Exception as e:
+                    logger.error(f"Ошибка при чтении кэша: {str(e)}")
+        
+        return None, False    

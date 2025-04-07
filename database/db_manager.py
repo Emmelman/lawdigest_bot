@@ -7,7 +7,8 @@ import time
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, scoped_session
 from datetime import datetime, timedelta
-
+import json
+from sqlalchemy import or_, and_
 from .models import Base, Message, Digest, DigestSection, init_db
 
 logger = logging.getLogger(__name__)
@@ -629,5 +630,318 @@ class DatabaseManager:
             logger.error(f"Ошибка при получении дайджеста по дате: {str(e)}")
             return None
         finally:
-            session.close()             
+            session.close()
+    def save_digest_with_parameters(self, date, text, sections, digest_type="brief", 
+                              date_range_start=None, date_range_end=None, 
+                              focus_category=None, channels_filter=None, 
+                              keywords_filter=None, digest_id=None):
+        """
+        Сохранение дайджеста с расширенными параметрами
+        """
+        session = self.Session()
+        try:
+            if digest_id:
+                # Обновляем существующий дайджест
+                digest = session.query(Digest).filter_by(id=digest_id).first()
+                if digest:
+                    digest.text = text
+                    digest.date = date
+                    digest.last_updated = datetime.now()
+                    # Обновляем параметры, если они предоставлены
+                    if date_range_start is not None:
+                        digest.date_range_start = date_range_start
+                    if date_range_end is not None:
+                        digest.date_range_end = date_range_end
+                    if focus_category is not None:
+                        digest.focus_category = focus_category
+                    if channels_filter is not None:
+                        digest.channels_filter = json.dumps(channels_filter) if channels_filter else None
+                    if keywords_filter is not None:
+                        digest.keywords_filter = json.dumps(keywords_filter) if keywords_filter else None
+                    
+                    # Удаляем существующие секции
+                    session.query(DigestSection).filter_by(digest_id=digest_id).delete()
+                else:
+                    # Если дайджест не найден, создаем новый
+                    digest = Digest(
+                        date=date, 
+                        text=text, 
+                        digest_type=digest_type,
+                        date_range_start=date_range_start,
+                        date_range_end=date_range_end,
+                        focus_category=focus_category,
+                        channels_filter=json.dumps(channels_filter) if channels_filter else None,
+                        keywords_filter=json.dumps(keywords_filter) if keywords_filter else None,
+                        last_updated=datetime.now()
+                    )
+                    session.add(digest)
+            else:
+                # Создаем новый дайджест
+                digest = Digest(
+                    date=date, 
+                    text=text, 
+                    digest_type=digest_type,
+                    date_range_start=date_range_start,
+                    date_range_end=date_range_end,
+                    focus_category=focus_category,
+                    channels_filter=json.dumps(channels_filter) if channels_filter else None,
+                    keywords_filter=json.dumps(keywords_filter) if keywords_filter else None,
+                    last_updated=datetime.now()
+                )
+                session.add(digest)
+            
+            session.flush()  # Получаем ID дайджеста
+            
+            # Добавляем секции
+            sections_data = []
+            for category, section_text in sections.items():
+                section = DigestSection(
+                    digest_id=digest.id,
+                    category=category,
+                    text=section_text
+                )
+                session.add(section)
+                sections_data.append({
+                    "category": category,
+                    "text": section_text
+                })
+            
+            # Фиксируем изменения
+            session.commit()
+            
+            # Создаем результат для возврата
+            result = {
+                "id": digest.id,
+                "date": date,
+                "digest_type": digest_type,
+                "sections": sections_data
+            }
+            
+            logger.info(f"Сохранен дайджест типа '{digest_type}' за {date.strftime('%Y-%m-%d')}")
+            return result
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Ошибка при сохранении дайджеста: {str(e)}")
+            raise
+        finally:
+            session.close()
+
+    def find_digests_by_parameters(self, digest_type=None, date=None, 
+                                date_range_start=None, date_range_end=None,
+                                focus_category=None, limit=5):
+            """
+            Поиск дайджестов по параметрам
+            """
+            session = self.Session()
+            try:
+                query = session.query(Digest)
+                
+                if digest_type:
+                    query = query.filter(Digest.digest_type == digest_type)
+                
+                if date:
+                    # Поиск дайджестов на конкретную дату
+                    start_date = datetime(date.year, date.month, date.day)
+                    end_date = start_date + timedelta(days=1)
+                    query = query.filter(Digest.date >= start_date, Digest.date < end_date)
+                
+                if date_range_start and date_range_end:
+                    # Поиск дайджестов, которые охватывают указанный период
+                    query = query.filter(
+                        or_(
+                            # Дайджест начинается внутри указанного периода
+                            and_(
+                                Digest.date_range_start >= date_range_start,
+                                Digest.date_range_start <= date_range_end
+                            ),
+                            # Дайджест заканчивается внутри указанного периода
+                            and_(
+                                Digest.date_range_end >= date_range_start,
+                                Digest.date_range_end <= date_range_end
+                            ),
+                            # Дайджест охватывает весь указанный период
+                            and_(
+                                Digest.date_range_start <= date_range_start,
+                                Digest.date_range_end >= date_range_end
+                            )
+                        )
+                    )
+                
+                if focus_category:
+                    query = query.filter(Digest.focus_category == focus_category)
+                
+                # Сортируем по дате создания (сначала новые)
+                digests = query.order_by(Digest.created_at.desc()).limit(limit).all()
+                
+                results = []
+                for digest in digests:
+                    results.append({
+                        "id": digest.id,
+                        "date": digest.date,
+                        "digest_type": digest.digest_type,
+                        "focus_category": digest.focus_category,
+                        "date_range_start": digest.date_range_start,
+                        "date_range_end": digest.date_range_end,
+                        "created_at": digest.created_at
+                    })
+                
+                return results
+            except Exception as e:
+                logger.error(f"Ошибка при поиске дайджестов: {str(e)}")
+                return []
+            finally:
+                session.close()
+    def get_digests_containing_date(self, date):
+        """
+        Находит все дайджесты, которые включают указанную дату
+        """
+        session = self.Session()
+        try:
+            results = []
+            
+            # Поиск дайджестов, у которых указан диапазон дат
+            range_digests = session.query(Digest).filter(
+                Digest.date_range_start != None,
+                Digest.date_range_end != None,
+                Digest.date_range_start <= date,
+                Digest.date_range_end >= date
+            ).all()
+            
+            # Поиск дайджестов за конкретную дату
+            single_day_digests = session.query(Digest).filter(
+                Digest.date == date,
+                or_(
+                    Digest.date_range_start == None,
+                    Digest.date_range_end == None
+                )
+            ).all()
+            
+            # Объединяем результаты
+            all_digests = range_digests + single_day_digests
+            
+            for digest in all_digests:
+                results.append({
+                    "id": digest.id,
+                    "date": digest.date,
+                    "digest_type": digest.digest_type,
+                    "date_range_start": digest.date_range_start,
+                    "date_range_end": digest.date_range_end,
+                    "focus_category": digest.focus_category,
+                    "channels_filter": json.loads(digest.channels_filter) if digest.channels_filter else None,
+                    "keywords_filter": json.loads(digest.keywords_filter) if digest.keywords_filter else None
+                })
+            
+            return results
+        except Exception as e:
+            logger.error(f"Ошибка при поиске дайджестов, содержащих дату: {str(e)}")
+            return []
+        finally:
+            session.close()
+
+    def get_digest_by_id_with_sections(self, digest_id):
+        """
+        Получение дайджеста по ID со всеми секциями
+        """
+        from sqlalchemy.orm import joinedload
+        
+        session = self.Session()
+        try:
+            digest = session.query(Digest).options(
+                joinedload(Digest.sections)
+            ).filter_by(id=digest_id).first()
+            
+            if not digest:
+                return None
+            
+            # Создаем словарь с данными
+            result = {
+                "id": digest.id,
+                "date": digest.date,
+                "text": digest.text,
+                "digest_type": digest.digest_type,
+                "date_range_start": digest.date_range_start,
+                "date_range_end": digest.date_range_end,
+                "focus_category": digest.focus_category,
+                "channels_filter": json.loads(digest.channels_filter) if digest.channels_filter else None,
+                "keywords_filter": json.loads(digest.keywords_filter) if digest.keywords_filter else None,
+                "created_at": digest.created_at,
+                "last_updated": digest.last_updated,
+                "sections": []
+            }
+            
+            # Добавляем данные о секциях
+            for section in digest.sections:
+                result["sections"].append({
+                    "id": section.id,
+                    "category": section.category,
+                    "text": section.text
+                })
+            
+            return result
+        except Exception as e:
+            logger.error(f"Ошибка при получении дайджеста по ID: {str(e)}")
+            return None
+        finally:
+            session.close()
+    def get_filtered_messages(self, start_date, end_date, category=None, 
+                         channels=None, keywords=None, page=1, page_size=100):
+        """
+        Получение сообщений с расширенной фильтрацией и пагинацией
+        
+        Args:
+            start_date (datetime): Начальная дата
+            end_date (datetime): Конечная дата
+            category (str, optional): Категория для фильтрации
+            channels (list, optional): Список каналов для фильтрации
+            keywords (list, optional): Ключевые слова для фильтрации
+            page (int): Номер страницы
+            page_size (int): Размер страницы
+            
+        Returns:
+            dict: Сообщения и информация о пагинации
+        """
+        from sqlalchemy import or_
+        
+        session = self.Session()
+        try:
+            query = session.query(Message).filter(
+                Message.date >= start_date,
+                Message.date <= end_date
+            )
+            
+            if category:
+                query = query.filter(Message.category == category)
+            
+            if channels:
+                query = query.filter(Message.channel.in_(channels))
+            
+            if keywords:
+            # Создаем условия поиска для каждого ключевого слова
+                keyword_conditions = []
+                for keyword in keywords:
+                    keyword_conditions.append(Message.text.ilike(f'%{keyword}%'))
+                
+                # Объединяем условия через OR
+                query = query.filter(or_(*keyword_conditions))
+        
+            # Получаем общее количество записей для пагинации
+            total = query.count()
+            
+            # Применяем пагинацию
+            offset = (page - 1) * page_size
+            messages = query.order_by(Message.date.desc()).offset(offset).limit(page_size).all()
+            
+            # Формируем результат
+            return {
+                "messages": messages,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": (total + page_size - 1) // page_size
+            }
+        except Exception as e:
+            logger.error(f"Ошибка при получении отфильтрованных сообщений: {str(e)}")
+            return {"messages": [], "total": 0, "page": page, "page_size": page_size, "total_pages": 0}
+        finally:
+            session.close()                               
                        

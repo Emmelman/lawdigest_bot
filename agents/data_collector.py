@@ -8,7 +8,7 @@ from telethon import TelegramClient
 from telethon.tl.functions.messages import GetHistoryRequest
 from langchain.tools import Tool
 from crewai import Agent, Task
-
+import time
 from config.settings import TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_CHANNELS
 
 logger = logging.getLogger(__name__)
@@ -249,14 +249,84 @@ class DataCollectorAgent:
         
         total_messages = sum(results.values())
         logger.info(f"Сбор данных завершен. Всего собрано {total_messages} новых сообщений")
-        
+        if total_messages > 0:
+            self.after_collect_hook({
+                "status": "success",
+                "total_new_messages": total_messages,
+                "channels_stats": results
+            })
         return {
             "status": "success",
             "total_new_messages": total_messages,
             "channels_stats": results
         }
     
-    
+    def after_collect_hook(self, collect_result):
+        """
+        Хук, вызываемый после успешного сбора данных
+        
+        Args:
+            collect_result (dict): Результаты сбора данных
+        """
+        if collect_result.get("total_new_messages", 0) > 0:
+            # Если собраны новые сообщения, запускаем обновление дайджестов
+            logger.info(f"Собрано {collect_result['total_new_messages']} новых сообщений, запускаем обновление дайджестов")
+            
+            try:
+                # Получаем текущую дату
+                today = datetime.now()
+                
+                # Запускаем обновление дайджестов, которые включают сегодняшнюю дату
+                from agents.digester import DigesterAgent
+                digester = DigesterAgent(self.db_manager)
+                update_result = digester.update_digests_for_date(today)
+                
+                logger.info(f"Результат обновления дайджестов: {update_result}")
+                return update_result
+            except Exception as e:
+                logger.error(f"Ошибка при обновлении дайджестов после сбора данных: {str(e)}")
+                return {"status": "error", "error": str(e)}
+        
+        return {"status": "no_update_needed"}
+    # В DataCollectorAgent:
+    def collect_from_multiple_sources(self, channels, days_back=1, batch_size=10):
+        """
+        Оптимизированный сбор данных из множества каналов с батчингом
+        """
+        logger.info(f"Запуск оптимизированного сбора данных из {len(channels)} каналов")
+        
+        # Разбиваем каналы на группы
+        channel_groups = [channels[i:i+batch_size] for i in range(0, len(channels), batch_size)]
+        
+        all_results = {}
+        total_messages = 0
+        
+        for group_idx, group in enumerate(channel_groups):
+            logger.info(f"Обработка группы каналов {group_idx+1}/{len(channel_groups)}: {', '.join(group)}")
+            
+            try:
+                # Собираем данные из этой группы каналов параллельно
+                group_results = self._collect_all_channels_parallel(
+                    channels=group,
+                    days_back=days_back
+                )
+                
+                # Обрабатываем результаты
+                group_total = sum(group_results.values())
+                total_messages += group_total
+                all_results.update(group_results)
+                
+                logger.info(f"Группа {group_idx+1}: собрано {group_total} сообщений")
+                
+                # Делаем небольшую паузу между группами, чтобы не перегружать API
+                if group_idx < len(channel_groups) - 1:
+                    time.sleep(2)
+                    
+            except Exception as e:
+                logger.error(f"Ошибка при обработке группы каналов {group_idx+1}: {str(e)}")
+        
+        logger.info(f"Всего собрано {total_messages} сообщений из {len(channels)} каналов")
+        return all_results
     
     def create_task(self):
         """

@@ -5,7 +5,7 @@ import logging
 import re
 from datetime import datetime, timedelta
 from crewai import Agent, Task
-
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from config.settings import CATEGORIES, BOT_USERNAME
 from database.db_manager import DatabaseManager
 from llm.gemma_model import GemmaLLM
@@ -43,25 +43,22 @@ class DigesterAgent:
             tools=[create_digest_tool]
         )
     def _extract_title_for_url(self, text, url):
+         
         """
-        Улучшенное извлечение заголовка для URL
+        Улучшенное извлечение заголовка для URL из @dumainfo
         """
-        # Особая обработка для сообщений от Госдумы
-        if "dumainfo" in text and "Государственная Дума" in text:
-            # Ищем конкретное содержание после стандартного заголовка
+        # Проверка на сообщение из канала думы
+        if "@dumainfo" in url or "dumainfo" in text:
+            # Разделим по строкам и найдем подходящий заголовок
             lines = text.split('\n')
             for i, line in enumerate(lines):
-                if "Государственная Дума" in line and i + 1 < len(lines):
-                    # Берем следующую непустую строку после заголовка
-                    next_line = lines[i + 1].strip()
-                    if next_line and len(next_line) > 10 and "http" not in next_line:
-                        return next_line[:100] + "..." if len(next_line) > 100 else next_line
-                    
-                    # Если следующая строка не подходит, ищем дальше
-                    for j in range(i + 2, min(i + 5, len(lines))):
-                        content = lines[j].strip()
-                        if content and len(content) > 15 and "http" not in content:
-                            return content[:100] + "..." if len(content) > 100 else content
+                # Пропускаем пустые строки и стандартные заголовки
+                if len(line.strip()) < 10 or "Государственная Дума" in line:
+                    continue
+                
+                # Берем первую содержательную строку как заголовок
+                if len(line.strip()) > 15 and "http" not in line and "@" not in line:
+                    return line.strip()
         # Разделим текст на части до и после URL
         parts = text.split(url)
         
@@ -289,10 +286,10 @@ class DigesterAgent:
 
             if item["has_url"]:
                 # Если есть настоящая ссылка, используем markdown-формат с жирным шрифтом для номера
-                section_text += f"**{idx+1}.** [{item['title']}]({item['url']}) - {channel_name}, {formatted_date}\n{annotation}\n\n"
+                section_text += f"<b>{idx+1}.</b> <a href='{item['url']}'>{item['title']}</a> - {channel_name}, {formatted_date}\n{annotation}\n\n"
             else:
                 # Если нет ссылки, просто выводим текст с жирным шрифтом для номера и заголовка
-                section_text += f"**{idx+1}.** **{item['title']}** - {channel_name}, {formatted_date}\n{annotation}\n\n"
+                section_text += f"<b>{idx+1}.</b> <b>{item['title']}</b> - {channel_name}, {formatted_date}\n{annotation}\n\n"
         
         # Добавляем ссылку на полный обзор
         section_text += f"\n[Открыть полный обзор по категории '{category}'](/category/{category})\n"
@@ -443,57 +440,113 @@ class DigesterAgent:
             else:
                 intro_text += "\n\n*Подробная версия дайджеста.*"
             return intro_text
-
-    def create_digest(self, date=None, days_back=1, digest_type="both"):
+    def _process_categories_parallel(self, categories_to_process, messages_by_category, digest_type):
         """
-        Инструмент для создания дайджеста
+        Параллельная обработка секций дайджеста
+        """
+        results = {}
+        
+        with ThreadPoolExecutor(max_workers=min(4, len(categories_to_process))) as executor:
+            future_to_category = {}
+            
+            for category in categories_to_process:
+                if digest_type == "brief":
+                    future = executor.submit(
+                        self._generate_brief_section, category, messages_by_category[category]
+                    )
+                else:
+                    future = executor.submit(
+                        self._generate_detailed_section, category, messages_by_category[category]
+                    )
+                future_to_category[future] = category
+            
+            for future in as_completed(future_to_category):
+                category = future_to_category[future]
+                try:
+                    section_text = future.result()
+                    results[category] = section_text
+                except Exception as e:
+                    logger.error(f"Ошибка при обработке категории {category}: {str(e)}")
+        
+        return results
+
+    def create_digest(self, date=None, days_back=1, digest_type="both", 
+                update_existing=True, focus_category=None,
+                channels=None, keywords=None, digest_id=None):
+        """
+        Инструмент для создания дайджеста с расширенными параметрами
         
         Args:
             date (datetime, optional): Дата дайджеста (по умолчанию сегодня)
             days_back (int): Количество дней для сбора сообщений
-            digest_type (str): Тип дайджеста: "brief" (краткий), "detailed" (подробный), "both" (оба)
+            digest_type (str): Тип дайджеста: "brief", "detailed", "both"
+            update_existing (bool): Обновлять существующий дайджест или создать новый
+            focus_category (str, optional): Фокус на определенную категорию
+            channels (list, optional): Список каналов для фильтрации
+            keywords (list, optional): Ключевые слова для фильтрации
+            digest_id (int, optional): ID существующего дайджеста для обновления
             
         Returns:
             dict: Результаты создания дайджеста
         """
         # Определяем даты
         end_date = date or datetime.now()
-        start_date = end_date - timedelta(days=days_back)
+        start_date = end_date - timedelta(days=days_back-1)
         
         logger.info(f"Создание дайджеста за период с {start_date.strftime('%Y-%m-%d')} по {end_date.strftime('%Y-%m-%d')}, тип: {digest_type}")
         
-        # Счетчики для статистики
-        total_messages = 0
+        # Получаем сообщения с применением расширенных фильтров
+        messages = self.db_manager.get_filtered_messages(
+            start_date=start_date,
+            end_date=end_date,
+            category=focus_category,
+            channels=channels,
+            keywords=keywords
+        )
+        
+        # Если сообщений нет, возвращаем ошибку
+        if not messages:
+            return {
+                "status": "no_messages",
+                "message": "Нет сообщений, соответствующих критериям фильтрации"
+            }
+        
+        # Группируем сообщения по категориям
+        messages_by_category = {}
         categories_count = {category: 0 for category in CATEGORIES}
         categories_count["другое"] = 0
+        total_messages = 0
         
-        # Словари для хранения секций разных типов дайджеста
+        for msg in messages:
+            category = msg.category or "другое"
+            if category not in messages_by_category:
+                messages_by_category[category] = []
+            messages_by_category[category].append(msg)
+            
+            if category in categories_count:
+                categories_count[category] += 1
+            else:
+                categories_count["другое"] += 1
+            
+            total_messages += 1
+        
+        # Формируем секции дайджеста в зависимости от типа
         brief_sections = {}
         detailed_sections = {}
         
-        # Словарь для хранения сообщений по категориям (чтобы не запрашивать их дважды)
-        messages_by_category = {}
-        
-        # Собираем сообщения по категориям
-        for category in CATEGORIES + ["другое"]:
-            # Получаем сообщения для этой категории
-            messages = self.db_manager.get_messages_by_date_range(
-                start_date=start_date,
-                end_date=end_date,
-                category=category
+        if digest_type in ["brief", "both"]:
+            # Параллельная обработка категорий для краткого дайджеста
+            categories_to_process = [cat for cat in messages_by_category.keys()]
+            brief_sections = self._process_categories_parallel(
+                categories_to_process, messages_by_category, "brief"
             )
-            
-            messages_by_category[category] = messages
-            categories_count[category] = len(messages)
-            total_messages += len(messages)
-            
-            # Если есть сообщения, создаем обзоры нужных типов
-            if messages:
-                if digest_type in ["brief", "both"]:
-                    brief_sections[category] = self._generate_brief_section(category, messages)
-                
-                if digest_type in ["detailed", "both"]:
-                    detailed_sections[category] = self._generate_detailed_section(category, messages)
+        
+        if digest_type in ["detailed", "both"]:
+            # Параллельная обработка категорий для подробного дайджеста
+            categories_to_process = [cat for cat in messages_by_category.keys()]
+            detailed_sections = self._process_categories_parallel(
+                categories_to_process, messages_by_category, "detailed"
+            )
         
         results = {
             "status": "success",
@@ -506,7 +559,10 @@ class DigesterAgent:
         if digest_type in ["brief", "both"]:
             try:
                 # Генерируем вводную часть
-                intro_text = self._generate_digest_intro(end_date, total_messages, categories_count, is_brief=True, days_back=days_back)
+                intro_text = self._generate_digest_intro(
+                    end_date, total_messages, categories_count, 
+                    is_brief=True, days_back=days_back
+                )
                 
                 # Формируем полный текст краткого дайджеста
                 brief_text = f"{intro_text}\n\n"
@@ -526,13 +582,19 @@ class DigesterAgent:
                 
                 results["brief_digest_text"] = brief_text
                 
-                # Сохраняем краткий дайджест в БД
+                # Сохраняем краткий дайджест в БД с параметрами
                 try:
-                    brief_result = self.db_manager.save_digest(
+                    brief_result = self.db_manager.save_digest_with_parameters(
                         end_date, 
                         brief_text, 
                         brief_sections,
-                        digest_type="brief"
+                        digest_type="brief",
+                        date_range_start=start_date,
+                        date_range_end=end_date,
+                        focus_category=focus_category,
+                        channels_filter=channels,
+                        keywords_filter=keywords,
+                        digest_id=digest_id if digest_type == "brief" else None
                     )
                     results["brief_digest_id"] = brief_result["id"]
                     logger.info(f"Краткий дайджест успешно создан и сохранен (ID: {brief_result['id']})")
@@ -544,15 +606,19 @@ class DigesterAgent:
                 results["brief_error"] = str(e)
         
         # Формируем подробный дайджест, если запрошено
+        # Формируем подробный дайджест, если запрошено
         if digest_type in ["detailed", "both"]:
             try:
                 # Генерируем вводную часть
-                intro_text = self._generate_digest_intro(end_date, total_messages, categories_count, is_brief=False, days_back=days_back)
+                intro_text = self._generate_digest_intro(
+                    end_date, total_messages, categories_count, 
+                    is_brief=False, days_back=days_back
+                )
                 
                 # Формируем полный текст подробного дайджеста
                 detailed_text = f"{intro_text}\n\n"
                 
-                # Сначала добавляем категории с сообщениями в порядке значимости
+                # Добавляем секции по категориям в порядке значимости
                 for category in CATEGORIES:
                     if category in detailed_sections:
                         category_icon = self._add_category_icon(category)
@@ -569,13 +635,19 @@ class DigesterAgent:
                 
                 results["detailed_digest_text"] = detailed_text
                 
-                # Сохраняем подробный дайджест в БД
+                # Сохраняем подробный дайджест в БД с параметрами
                 try:
-                    detailed_result = self.db_manager.save_digest(
+                    detailed_result = self.db_manager.save_digest_with_parameters(
                         end_date, 
                         detailed_text, 
                         detailed_sections,
-                        digest_type="detailed"
+                        digest_type="detailed",
+                        date_range_start=start_date,
+                        date_range_end=end_date,
+                        focus_category=focus_category,
+                        channels_filter=channels,
+                        keywords_filter=keywords,
+                        digest_id=digest_id if digest_type == "detailed" else None
                     )
                     results["detailed_digest_id"] = detailed_result["id"]
                     logger.info(f"Подробный дайджест успешно создан и сохранен (ID: {detailed_result['id']})")
@@ -600,3 +672,75 @@ class DigesterAgent:
             agent=self.agent,
             expected_output="Результаты создания дайджеста с полным текстом"
         )
+    def update_digests_for_date(self, date):
+        """
+        Обновляет все дайджесты, содержащие указанную дату
+        
+        Args:
+            date (datetime): Дата для обновления дайджестов
+            
+        Returns:
+            dict: Результаты обновления
+        """
+        logger.info(f"Обновление дайджестов, содержащих дату {date.strftime('%Y-%m-%d')}")
+        
+        # Получаем все дайджесты, включающие эту дату
+        digests = self.db_manager.get_digests_containing_date(date)
+        
+        if not digests:
+            logger.info(f"Дайджесты, содержащие дату {date.strftime('%Y-%m-%d')}, не найдены")
+            return {"status": "no_digests", "date": date.strftime('%Y-%m-%d')}
+        
+        results = {"updated_digests": []}
+        
+        for digest in digests:
+            # Извлекаем параметры для создания нового дайджеста
+            digest_date = digest["date"]
+            digest_type = digest["digest_type"]
+            focus_category = digest["focus_category"]
+            channels = digest["channels_filter"]
+            keywords = digest["keywords_filter"]
+            
+            # Определяем период для обновления
+            if digest["date_range_start"] and digest["date_range_end"]:
+                start_date = digest["date_range_start"]
+                end_date = digest["date_range_end"]
+                days_back = (end_date - start_date).days + 1
+            else:
+                # Если диапазон не указан, считаем, что это дайджест за один день
+                start_date = end_date = digest_date
+                days_back = 1
+            
+            try:
+                # Обновляем дайджест с теми же параметрами
+                result = self.create_digest(
+                    date=end_date,
+                    days_back=days_back,
+                    digest_type=digest_type,
+                    update_existing=True,
+                    focus_category=focus_category,
+                    channels=channels,
+                    keywords=keywords,
+                    digest_id=digest["id"]
+                )
+                
+                results["updated_digests"].append({
+                    "digest_id": digest["id"],
+                    "digest_type": digest_type,
+                    "date": end_date.strftime('%Y-%m-%d'),
+                    "status": "success"
+                })
+                
+                logger.info(f"Дайджест ID {digest['id']} успешно обновлен")
+            except Exception as e:
+                logger.error(f"Ошибка при обновлении дайджеста ID {digest['id']}: {str(e)}")
+                results["updated_digests"].append({
+                    "digest_id": digest["id"],
+                    "digest_type": digest_type,
+                    "date": end_date.strftime('%Y-%m-%d'),
+                    "status": "error",
+                    "error": str(e)
+                })
+        
+        logger.info(f"Обновлено {len(results['updated_digests'])} дайджестов для даты {date.strftime('%Y-%m-%d')}")
+        return results

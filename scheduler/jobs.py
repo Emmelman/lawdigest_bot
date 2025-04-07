@@ -117,6 +117,13 @@ class JobScheduler:
             id='create_digest'
         )
         
+        # Задача обновления дайджестов (после анализа сообщений)
+        self.scheduler.add_job(
+            self.update_digests_job,
+            IntervalTrigger(minutes=ANALYZE_INTERVAL_MINUTES + 5),  # Запускаем чуть позже анализа
+            id='update_digests'
+        )
+        
         logger.info("Задачи настроены")
     
     def start(self):
@@ -129,3 +136,21 @@ class JobScheduler:
         """Остановка планировщика"""
         self.scheduler.shutdown()
         logger.info("Планировщик остановлен")
+    
+    def update_digests_job(self):
+        """Задача обновления дайджестов при получении новых сообщений"""
+        logger.info("Запуск задачи обновления дайджестов")
+        try:
+            # Определяем дату для обновления (обычно сегодня)
+            today = datetime.now()
+            
+            # Создаем агент-дайджестер
+            from agents.digester import DigesterAgent
+            digester = DigesterAgent(self.db_manager)
+            
+            # Обновляем все дайджесты, содержащие сегодняшнюю дату
+            result = digester.update_digests_for_date(today)
+            
+            logger.info(f"Задача обновления дайджестов завершена: {result}")
+        except Exception as e:
+            logger.error(f"Ошибка при выполнении задачи обновления дайджестов: {str(e)}")  

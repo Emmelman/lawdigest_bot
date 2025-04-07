@@ -6,7 +6,7 @@ import json
 import os
 from langchain.tools import Tool
 from crewai import Agent, Task
-
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from config.settings import CATEGORIES
 
 logger = logging.getLogger(__name__)
@@ -221,19 +221,142 @@ class AnalyzerAgent:
             "categories": categories_count,
             "confidence_stats": confidence_stats
         }
-    
-    def create_task(self):
+    # В AnalyzerAgent:
+    def analyze_messages_batched(self, limit=500, batch_size=20, confidence_threshold=3):
         """
-        Создание задачи для агента
+        Анализ сообщений большими партиями с приоритизацией
         
+        Args:
+            limit (int): Максимальное количество сообщений для анализа
+            batch_size (int): Размер пакета для обработки
+            confidence_threshold (int): Пороговое значение уверенности для повторного анализа
+            
         Returns:
-            Task: Задача CrewAI
+            dict: Результаты анализа
         """
-        return Task(
-            description="Проанализировать и классифицировать непроанализированные сообщения",
-            agent=self.agent,
-            expected_output="Результаты анализа с информацией о количестве проанализированных сообщений и их категориях"
-        )
+        logger.info(f"Запуск анализа сообщений с оптимизацией, лимит: {limit}")
+        
+        # Получаем непроанализированные сообщения
+        unanalyzed = self.db_manager.get_unanalyzed_messages(limit=limit)
+        
+        if not unanalyzed:
+            logger.info("Нет новых сообщений для анализа")
+            
+            # Проверяем наличие сообщений с низкой уверенностью для повторного анализа
+            low_confidence = self.db_manager.get_messages_with_low_confidence(
+                confidence_threshold=confidence_threshold,
+                limit=min(limit, 50)  # Ограничиваем количество для повторного анализа
+            )
+            
+            if not low_confidence:
+                logger.info("Нет сообщений с низкой уверенностью для повторного анализа")
+                return {
+                    "status": "success",
+                    "analyzed_count": 0,
+                    "categories": {},
+                    "reanalyzed_count": 0
+                }
+            
+            logger.info(f"Найдено {len(low_confidence)} сообщений с низкой уверенностью для повторного анализа")
+            messages_to_analyze = low_confidence
+            is_reanalysis = True
+        else:
+            logger.info(f"Найдено {len(unanalyzed)} новых сообщений для анализа")
+            messages_to_analyze = unanalyzed
+            is_reanalysis = False
+        
+        # Разбиваем сообщения на пакеты
+        batches = [messages_to_analyze[i:i+batch_size] for i in range(0, len(messages_to_analyze), batch_size)]
+        
+        # Счетчики для статистики
+        categories_count = {category: 0 for category in CATEGORIES + ["другое"]}
+        confidence_stats = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
+        analyzed_count = 0
+        updated_count = 0
+        
+        # Обрабатываем пакеты параллельно
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            # Функция для обработки одного пакета
+            def process_batch(batch):
+                batch_results = []
+                for msg in batch:
+                    try:
+                        # Классифицируем сообщение
+                        category, confidence = self._classify_message(msg.text)
+                        
+                        # Если это повторный анализ и уверенность не улучшилась, пропускаем
+                        if is_reanalysis and confidence <= msg.confidence:
+                            batch_results.append({
+                                "message_id": msg.id,
+                                "status": "unchanged",
+                                "category": msg.category,
+                                "confidence": msg.confidence
+                            })
+                            continue
+                        
+                        # Обновляем категорию в БД
+                        success = self.db_manager.update_message_category(msg.id, category, confidence)
+                        
+                        if success:
+                            batch_results.append({
+                                "message_id": msg.id,
+                                "status": "updated" if is_reanalysis else "analyzed",
+                                "category": category,
+                                "confidence": confidence
+                            })
+                        else:
+                            batch_results.append({
+                                "message_id": msg.id,
+                                "status": "error",
+                                "error": "Не удалось обновить категорию"
+                            })
+                    except Exception as e:
+                        batch_results.append({
+                            "message_id": msg.id,
+                            "status": "error",
+                            "error": str(e)
+                        })
+                
+                return batch_results
+            
+            # Запускаем задачи
+            future_to_batch = {executor.submit(process_batch, batch): i for i, batch in enumerate(batches)}
+            
+            # Собираем результаты
+            all_results = []
+            for future in as_completed(future_to_batch):
+                batch_idx = future_to_batch[future]
+                try:
+                    batch_results = future.result()
+                    all_results.extend(batch_results)
+                    logger.info(f"Обработан пакет {batch_idx+1}/{len(batches)}: {len(batch_results)} сообщений")
+                except Exception as e:
+                    logger.error(f"Ошибка при обработке пакета {batch_idx+1}: {str(e)}")
+        
+        # Обрабатываем итоговые результаты
+        for result in all_results:
+            if result["status"] in ["analyzed", "updated"]:
+                category = result["category"]
+                confidence = result["confidence"]
+                
+                categories_count[category] += 1
+                confidence_stats[confidence] += 1
+                analyzed_count += 1
+                
+                if result["status"] == "updated":
+                    updated_count += 1
+        
+        logger.info(f"Анализ завершен. Проанализировано {analyzed_count} сообщений, обновлено {updated_count}")
+        logger.info(f"Распределение по категориям: {categories_count}")
+        logger.info(f"Распределение по уверенности: {confidence_stats}")
+        
+        return {
+            "status": "success",
+            "analyzed_count": analyzed_count,
+            "categories": categories_count,
+            "confidence_stats": confidence_stats,
+            "reanalyzed_count": updated_count if is_reanalysis else 0
+        }
     def _load_learning_examples(self, limit=10):
         """Загружает примеры для улучшения классификации"""
         examples_path = "learning_examples/examples.jsonl"
@@ -251,3 +374,18 @@ class AnalyzerAgent:
         except Exception as e:
             logger.error(f"Ошибка при загрузке обучающих примеров: {str(e)}")
             return []
+        
+    def create_task(self):
+        """
+        Создание задачи для агента
+        
+        Returns:
+            Task: Задача CrewAI
+        """
+        return Task(
+            description="Проанализировать и классифицировать непроанализированные сообщения",
+            agent=self.agent,
+            expected_output="Результаты анализа с информацией о количестве проанализированных сообщений и их категориях"
+        )
+    
+    
