@@ -31,41 +31,224 @@ def run_scheduler(scheduler):
     """Запуск планировщика в отдельном потоке"""
     scheduler.start()
 
+async def collect_messages(client, db_manager, channel, days_back=1, limit_per_request=100):
+    """Сбор сообщений из канала и сохранение в БД"""
+    logger.info(f"Сбор сообщений из канала {channel} за последние {days_back} дней...")
+    
+    try:
+        entity = await client.get_entity(channel)
+        
+        # Определение дат для фильтрации
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days_back)
+        
+        logger.info(f"Период сбора: с {start_date.strftime('%Y-%m-%d')} по {end_date.strftime('%Y-%m-%d')}")
+        
+        # Получаем сообщения с пагинацией
+        offset_id = 0
+        all_messages = []
+        total_messages = 0
+        
+        while True:
+            messages = await client.get_messages(
+                entity, 
+                limit=limit_per_request,
+                offset_id=offset_id
+            )
+            
+            if not messages:
+                break
+                
+            total_messages += len(messages)
+            
+            # Фильтруем сообщения по дате - важно привести даты к одному формату!
+            filtered_messages = []
+            for msg in messages:
+                # Преобразуем дату из Telegram (aware) в naive datetime
+                msg_date = msg.date.replace(tzinfo=None)
+                if start_date <= msg_date <= end_date:
+                    filtered_messages.append(msg)
+            
+            all_messages.extend(filtered_messages)
+            
+            # Проверяем, нужно ли продолжать пагинацию
+            if len(messages) < limit_per_request:
+                # Получили меньше сообщений, чем запрашивали (конец списка)
+                break
+                
+            # Проверяем дату последнего сообщения
+            last_date = messages[-1].date.replace(tzinfo=None)
+            if last_date < start_date:
+                # Последнее сообщение старше начальной даты, прекращаем сбор
+                break
+                
+            # Устанавливаем смещение для следующего запроса
+            offset_id = messages[-1].id
+            
+            logger.debug(f"Получено {len(filtered_messages)} сообщений из {len(messages)}. "
+                         f"Продолжаем пагинацию с ID {offset_id}")
+        
+        logger.info(f"Всего получено {total_messages} сообщений, отфильтровано {len(all_messages)} "
+                    f"за указанный период")
+        
+        # Сохраняем отфильтрованные сообщения
+        saved_count = 0
+        for msg in all_messages:
+            if msg.message:  # Проверяем, что сообщение содержит текст
+                try:
+                    db_manager.save_message(
+                        channel=channel,
+                        message_id=msg.id,
+                        text=msg.message,
+                        date=msg.date.replace(tzinfo=None)  # Убираем информацию о часовом поясе
+                    )
+                    saved_count += 1
+                except Exception as e:
+                    logger.error(f"Ошибка при сохранении сообщения {msg.id}: {str(e)}")
+        
+        logger.info(f"Сохранено {saved_count} сообщений из канала {channel}")
+        return saved_count
+    except Exception as e:
+        logger.error(f"Ошибка при сборе сообщений из канала {channel}: {str(e)}")
+        return 0
+
+async def analyze_messages(db_manager, llm_model, limit=50):
+    """Анализ и классификация сообщений"""
+    logger.info(f"Анализ сообщений (лимит: {limit})...")
+    
+    from agents.analyzer import AnalyzerAgent
+    analyzer = AnalyzerAgent(db_manager, llm_model)
+    result = analyzer.analyze_messages(limit=limit)
+    
+    logger.info(f"Анализ завершен: {result}")
+    return result
+
+async def review_categorization(db_manager, limit=20):
+    """Проверка и исправление категоризации"""
+    logger.info(f"Проверка категоризации последних {limit} сообщений...")
+    
+    critic = CriticAgent(db_manager)
+    results = critic.review_recent_categorizations(limit=limit)
+    
+    logger.info(f"Проверка завершена. Всего: {results['total']}, обновлено: {results['updated']}, "
+                f"без изменений: {results['unchanged']}")
+    
+    return results
+
+async def create_digest(db_manager, llm_model, days_back=1):
+    """Создание дайджеста"""
+    logger.info(f"Создание дайджеста за последние {days_back} дней...")
+    
+    from agents.digester import DigesterAgent
+    digester = DigesterAgent(db_manager, llm_model)
+    digest = digester.create_digest(days_back=days_back)
+    
+    logger.info(f"Дайджест создан: {digest.get('status', 'unknown')}")
+    return digest
+
+# Обновление в main.py
+
 async def run_full_workflow(days_back=1):
-    """Запуск полного рабочего процесса с использованием общего движка"""
+    """Запуск полного рабочего процесса с уверенностью и оптимизацией"""
     logger.info(f"Запуск оптимизированного рабочего процесса за последние {days_back} дней...")
     
     # Инициализация компонентов
     db_manager = DatabaseManager(DATABASE_URL)
+    qwen_model = QwenLLM()
+    gemma_model = GemmaLLM()
     
-    # Определяем период
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=days_back-1)
+    # Создаем клиент Telegram
+    client = TelegramClient('workflow_session', TELEGRAM_API_ID, TELEGRAM_API_HASH)
+    await client.start()
     
-    # Используем общий движок генерации дайджестов
-    from utils.digest_engine import generate_digest
-    
-    result = await generate_digest(
-        db_manager=db_manager,
-        start_date=start_date,
-        end_date=end_date
-    )
-    
-    # Записываем в лог подробные результаты
-    if result["status"] == "success":
-        logger.info(f"Дайджест успешно создан: краткий={bool(result.get('brief_digest_id'))}, подробный={bool(result.get('detailed_digest_id'))}")
+    try:
+        # Шаг 1: Параллельный сбор данных
+        logger.info("Шаг 1: Параллельный сбор данных")
+        from agents.data_collector import DataCollectorAgent
+        collector = DataCollectorAgent(db_manager)
         
-        # Логируем идентификаторы для отладки
-        if result.get("brief_digest_id"):
-            logger.info(f"ID краткого дайджеста: {result['brief_digest_id']}")
-        if result.get("detailed_digest_id"):
-            logger.info(f"ID подробного дайджеста: {result['detailed_digest_id']}")
-            
-        return True
-    else:
-        logger.error(f"Ошибка при создании дайджеста: {result.get('message', result.get('error', 'Неизвестная ошибка'))}")
-        return False
-    
+        # Прямой вызов асинхронного метода
+        collect_result = await collector.collect_data(days_back=days_back)
+        total_messages = collect_result.get("total_new_messages", 0)
+        
+        logger.info(f"Всего собрано {total_messages} новых сообщений")
+        
+        if total_messages == 0:
+            logger.info("Нет новых сообщений для анализа. Проверка на существующие сообщения с категориями...")
+            # Проверяем, есть ли уже сообщения с категориями
+            existing_messages = db_manager.get_recently_categorized_messages(1)
+            if not existing_messages:
+                logger.info("Нет сообщений с категориями. Завершение работы.")
+                return False
+        
+        # Шаг 2: Анализ сообщений
+        logger.info("Шаг 2: Анализ сообщений с оценкой уверенности")
+        from agents.analyzer import AnalyzerAgent
+        analyzer = AnalyzerAgent(db_manager, qwen_model)
+        analyzer.fast_check = True  # Включаем быструю проверку
+        analyze_result = analyzer.analyze_messages(
+            limit=max(total_messages, 30), 
+            batch_size=5
+        )
+        
+        analyzed_count = analyze_result.get("analyzed_count", 0)
+        confidence_stats = analyze_result.get("confidence_stats", {})
+        
+        logger.info(f"Проанализировано {analyzed_count} сообщений")
+        logger.info(f"Распределение по уровням уверенности: {confidence_stats}")
+        
+        # Шаг 3: Проверка категоризации
+        logger.info("Шаг 3: Проверка категоризации сообщений с низкой уверенностью")
+        critic = CriticAgent(db_manager)
+        review_result = critic.review_recent_categorizations(
+            confidence_threshold=2,  # Проверять только сообщения с уверенностью 1-2
+            limit=50,
+            batch_size=5,
+            max_workers=3
+        )
+        
+        updated_count = review_result.get("updated", 0)
+        logger.info(f"Проверка категоризации: обновлено {updated_count} сообщений")
+        
+        # Шаг 4: Создание дайджеста
+        logger.info("Шаг 4: Создание дайджеста")
+        from agents.digester import DigesterAgent
+        digester = DigesterAgent(db_manager, gemma_model)
+        digest_result = digester.create_digest(days_back=days_back)
+        
+        has_brief = "brief_digest_id" in digest_result
+        has_detailed = "detailed_digest_id" in digest_result
+        
+        if has_brief or has_detailed:
+            # Определяем период на основе days_back
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=days_back-1)
+
+            logger.info(f"Дайджест успешно создан: краткий={has_brief}, подробный={has_detailed}")
+            if has_brief or has_detailed:
+                # Сохраняем информацию о генерации дайджеста
+                digest_ids = {}
+                if "brief_digest_id" in digest_result:
+                    digest_ids["brief"] = digest_result["brief_digest_id"]
+                if "detailed_digest_id" in digest_result:
+                    digest_ids["detailed"] = digest_result["detailed_digest_id"]
+                
+                db_manager.save_digest_generation(
+                source="workflow",
+                messages_count=total_messages,
+                digest_ids=digest_ids,
+                start_date=start_date,  # Добавить эти параметры
+                end_date=end_date       # из существующих переменных
+                )
+            return True
+        else:
+            logger.error("Не удалось создать дайджест")
+            return False
+        
+        
+    finally:
+        # Закрываем соединение с Telegram
+        await client.disconnect()
 async def shutdown(signal, loop, client=None, scheduler=None, bot=None):
     """Корректное завершение приложения с закрытием всех подключений"""
     logger.info(f"Получен сигнал {signal.name}, завершение работы...")
@@ -129,12 +312,6 @@ def main():
                              'digest - только формирование дайджеста')
     parser.add_argument('--days', type=int, default=1, 
                         help='Количество дней для сбора сообщений (режимы workflow и digest)')
-    parser.add_argument('--start-date', type=str, default=None,
-                        help='Начальная дата для дайджеста в формате ДД.ММ.ГГГГ (режим digest)')
-    parser.add_argument('--end-date', type=str, default=None,
-                        help='Конечная дата для дайджеста в формате ДД.ММ.ГГГГ (режим digest)')
-    parser.add_argument('--category', type=str, default=None,
-                        help='Фокусная категория для дайджеста (режим digest)')
     
     args = parser.parse_args()
     
@@ -145,73 +322,15 @@ def main():
     elif args.mode == 'workflow':
         asyncio.run(run_full_workflow(days_back=args.days))
     elif args.mode == 'digest':
-        # Преобразуем строки дат в datetime, если они указаны
-        start_date = None
-        end_date = None
-        
-        if args.start_date:
-            try:
-                # Парсим из формата ДД.ММ.ГГГГ
-                day, month, year = map(int, args.start_date.split('.'))
-                start_date = datetime(year, month, day)
-                logger.info(f"Указана начальная дата: {start_date.strftime('%d.%m.%Y')}")
-            except (ValueError, TypeError) as e:
-                logger.error(f"Ошибка при разборе начальной даты: {str(e)}")
-                return
-                
-        if args.end_date:
-            try:
-                day, month, year = map(int, args.end_date.split('.'))
-                end_date = datetime(year, month, day)
-                logger.info(f"Указана конечная дата: {end_date.strftime('%d.%m.%Y')}")
-            except (ValueError, TypeError) as e:
-                logger.error(f"Ошибка при разборе конечной даты: {str(e)}")
-                return
-        
-        # Если указана только начальная дата, используем её и для конечной
-        if start_date and not end_date:
-            end_date = start_date
-            logger.info(f"Конечная дата не указана, используем начальную: {end_date.strftime('%d.%m.%Y')}")
-        
-        # Если не указаны даты, используем логику на основе days_back
-        if not start_date and not end_date:
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=args.days-1)
-            logger.info(f"Используем период {args.days} дн.: с {start_date.strftime('%d.%m.%Y')} по {end_date.strftime('%d.%m.%Y')}")
-            
-        # Инициализируем БД менеджер
         db_manager = DatabaseManager(DATABASE_URL)
+        gemma_model = GemmaLLM()
+        digest = asyncio.run(create_digest(db_manager, gemma_model, days_back=args.days))
         
-        # Импортируем новый движок дайджестов
-        from utils.digest_engine import generate_digest
-        
-        # Запускаем генерацию с учетом фокусной категории
-        result = asyncio.run(generate_digest(
-            db_manager=db_manager,
-            start_date=start_date,
-            end_date=end_date,
-            focus_category=args.category
-        ))
-        
-        if result.get("status") == "success":
+        if digest and digest.get('status') == 'success':
             logger.info("Дайджест успешно сформирован")
-            
-            # Получаем и показываем краткий дайджест
-            if result.get("brief_digest_id"):
-                brief_digest = db_manager.get_digest_by_id_with_sections(result["brief_digest_id"])
-                if brief_digest:
-                    logger.info("КРАТКИЙ ДАЙДЖЕСТ:")
-                    logger.info(brief_digest.get("text", ""))
-            
-            # Получаем и показываем подробный дайджест, если нужно
-            if result.get("detailed_digest_id"):
-                detailed_digest = db_manager.get_digest_by_id_with_sections(result["detailed_digest_id"])
-                if detailed_digest:
-                    logger.info("ПОДРОБНЫЙ ДАЙДЖЕСТ ТАКЖЕ СФОРМИРОВАН")
-                    # Раскомментируйте строку ниже, если хотите видеть и подробный дайджест в логах
-                    # logger.info(detailed_digest.get("text", ""))
+            logger.info(digest.get('digest_text', ''))
         else:
-            logger.error(f"Не удалось сформировать дайджест: {result.get('message', result.get('error', 'Неизвестная ошибка'))}")
+            logger.error("Не удалось сформировать дайджест")
 
 if __name__ == "__main__":
     main()

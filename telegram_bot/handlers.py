@@ -541,7 +541,6 @@ async def handle_gen_digest_callback(query, context, db_manager):
         await query.message.reply_text(
             "Укажите диапазон дат в формате ДД.ММ.ГГГГ-ДД.ММ.ГГГГ, например: 01.04.2025-07.04.2025"
         )
-        
     elif action == "category":
         # Выбор категории для фокуса
         keyboard = []
@@ -593,41 +592,6 @@ async def handle_gen_digest_callback(query, context, db_manager):
         )
         context.user_data["awaiting_channel_period"] = True
 
-async def handle_date_range_input(update, context, db_manager, user_input):
-    """Обработка ввода диапазона дат"""
-    context.user_data.pop("awaiting_date_range", None)  # Удаляем флаг ожидания
-    
-    try:
-        # Парсим диапазон дат из user_input
-        if "-" in user_input:
-            # Формат ДД.ММ.ГГГГ-ДД.ММ.ГГГГ
-            start_str, end_str = user_input.split("-")
-            
-            # Парсим начальную дату
-            start_date = datetime.strptime(start_str.strip(), "%d.%m.%Y")
-            
-            # Парсим конечную дату
-            end_date = datetime.strptime(end_str.strip(), "%d.%m.%Y")
-            
-            # Рассчитываем дни для журнала
-            days_diff = (end_date - start_date).days + 1
-            description = f"за период {days_diff} дн. ({start_date.strftime('%d.%m.%Y')}-{end_date.strftime('%d.%m.%Y')})"
-        else:
-            # Простой формат ДД.ММ.ГГГГ
-            date = datetime.strptime(user_input.strip(), "%d.%m.%Y")
-            start_date = end_date = date
-            description = f"за {start_date.strftime('%d.%m.%Y')}"
-        
-        # Запускаем генерацию дайджеста
-        await handle_digest_generation(
-            update, context, db_manager, 
-            start_date, end_date, description
-        )
-        
-    except ValueError as e:
-        await update.message.reply_text(
-            f"Ошибка в формате даты: {str(e)}. Пожалуйста, используйте формат ДД.ММ.ГГГГ или ДД.ММ.ГГГГ-ДД.ММ.ГГГГ"
-        )
 # Общий обработчик колбэков
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, db_manager):
     """Обработчик нажатий на кнопки"""
@@ -727,23 +691,13 @@ async def show_digest_by_id(message, digest_id, db_manager):
         else:
             await message.reply_text(chunk, parse_mode='HTML')
 
-# В telegram_bot/handlers.py
-
 async def handle_digest_generation(update, context, db_manager, start_date, end_date, 
                           description, focus_category=None, channels=None, keywords=None):
-    """Асинхронный запуск генерации дайджеста с использованием общего движка"""
+    """Асинхронный запуск генерации дайджеста с использованием оптимизаций workflow"""
     
     # Определяем, откуда пришел запрос (от сообщения или колбэка)
-    if hasattr(update, 'message') and update.message:
-        message = update.message
-        user_id = update.effective_user.id
-    elif hasattr(update, 'callback_query') and update.callback_query:
-        message = update.callback_query.message
-        user_id = update.callback_query.from_user.id
-         
-    else:
-        logger.error("Не удалось определить тип сообщения")
-        return
+    message = update.message if hasattr(update, 'message') else update.message
+    user_id = update.effective_user.id
     
     # Обработка дат и проверка предыдущей генерации (оставляем как есть)
     if not start_date:
@@ -776,8 +730,8 @@ async def handle_digest_generation(update, context, db_manager, start_date, end_
             description = f"за {start_date.strftime('%d.%m.%Y')}"
         else:
             description = f"за период с {start_date.strftime('%d.%m.%Y')} по {end_date.strftime('%d.%m.%Y')}"
-    
-    # Отправляем начальное сообщение о статусе
+
+    # Отправляем начальное сообщение о статусе (упрощенное)
     status_message = await message.reply_text(
         f"Запущена генерация дайджеста {description}.\n"
         f"{'Фокус на категории: ' + focus_category if focus_category else ''}\n"
@@ -785,103 +739,107 @@ async def handle_digest_generation(update, context, db_manager, start_date, end_
         "Обработка... ⏳"
     )
     
-    # Функция для обновления статуса
-    async def update_status(text):
-        try:
-            nonlocal status_message
-            await status_message.edit_text(f"{status_message.text}\n{text}")
-        except Exception as e:
-            logger.error(f"Ошибка при обновлении статуса: {str(e)}")
+    # Определяем количество дней для обработки
+    days_back = (end_date - start_date).days + 1
     
-    # Вызываем универсальную функцию генерации дайджеста
-    from utils.digest_engine import generate_digest
-    
-    result = await generate_digest(
-        db_manager=db_manager,
+    try:
+        # Инициализация компонентов - создаем их только раз
+        from llm.qwen_model import QwenLLM
+        from llm.gemma_model import GemmaLLM
+        from agents.data_collector import DataCollectorAgent
+        from agents.analyzer import AnalyzerAgent
+        from agents.critic import CriticAgent
+        from agents.digester import DigesterAgent
+        
+        qwen_model = QwenLLM()
+        gemma_model = GemmaLLM()
+        
+        # Этап 1: Параллельный сбор данных - используем оптимизированный метод как в workflow
+        collector = DataCollectorAgent(db_manager)
+        
+        # Используем асинхронный метод collect_data вместо _collect_all_channels_parallel
+        collect_result = await collector.collect_data(days_back=days_back)
+        
+        total_messages = collect_result.get("total_new_messages", 0)
+        
+        # Обновляем статус (только один раз после сбора данных)
+        await status_message.edit_text(
+            f"{status_message.text}\n✅ Собрано {total_messages} новых сообщений\n"
+            f"Анализ и категоризация... 🧠"
+        )
+        
+        # Этап 2: Оптимизированный анализ сообщений с быстрой проверкой
+        analyzer = AnalyzerAgent(db_manager, qwen_model)
+        analyzer.fast_check = True  # Важно! Включаем быстрые проверки как в workflow
+        
+        # Используем batched-версию метода для ускорения
+        analyze_result = analyzer.analyze_messages_batched(
+            limit=max(total_messages, 50),
+            batch_size=10,
+            confidence_threshold=2
+        )
+        
+        analyzed_count = analyze_result.get("analyzed_count", 0)
+        
+        # Этап 3: Оптимизированная проверка категоризации - только для сообщений с низкой уверенностью
+        critic = CriticAgent(db_manager)
+        review_result = critic.review_recent_categorizations(
+            confidence_threshold=2,  # Только сообщения с уверенностью ≤ 2
+            limit=min(30, analyzed_count),  # Ограничиваем количество проверяемых сообщений
+            batch_size=5,
+            max_workers=3  # Используем несколько потоков
+        )
+        
+        # Обновляем статус перед созданием дайджеста
+        await status_message.edit_text(
+            f"{status_message.text}\n✅ Проанализировано {analyzed_count} сообщений\n"
+            f"Формирование дайджеста... 📝"
+        )
+        
+        # Этап 4: Создание дайджеста
+        digester = DigesterAgent(db_manager, gemma_model)
+        result = digester.create_digest(
+            date=end_date,
+            days_back=days_back,
+            digest_type="both",  # Создаем оба типа дайджеста
+            focus_category=focus_category,
+            channels=channels,
+            keywords=keywords
+        )
+        
+        if result.get("status") == "no_messages":
+            await status_message.edit_text(
+                f"{status_message.text}\n❌ Не найдено сообщений, соответствующих критериям фильтрации."
+            )
+            return
+        
+        # Сохраняем информацию о генерации
+        digest_ids = {}
+        if "brief_digest_id" in result:
+            digest_ids["brief"] = result["brief_digest_id"]
+        if "detailed_digest_id" in result:
+            digest_ids["detailed"] = result["detailed_digest_id"]
+        
+        db_manager.save_digest_generation(
+        source="bot",
+        user_id=user_id,
+        channels=channels,
+        messages_count=total_messages,
+        digest_ids=digest_ids,
         start_date=start_date,
         end_date=end_date,
-        focus_category=focus_category,
-        channels=channels,
-        keywords=keywords,
-        update_status_callback=update_status
-    )
-    
-    # Финальное сообщение
-    if result["status"] == "success":
-        # Создаем кнопки для просмотра дайджестов
-        keyboard = []
-        if "brief_digest_id" in result:
-            keyboard.append([InlineKeyboardButton(
-                "Просмотреть краткий дайджест", 
-                callback_data=f"show_digest_{result['brief_digest_id']}"
-            )])
-        if "detailed_digest_id" in result:
-            keyboard.append([InlineKeyboardButton(
-                "Просмотреть подробный дайджест", 
-                callback_data=f"show_digest_{result['detailed_digest_id']}"
-            )])
+        focus_category=focus_category
+        )
         
-        reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
-        
+        # Финальное сообщение
         await status_message.edit_text(
             f"✅ Дайджест {description} успешно сформирован!\n\n"
-            f"Обработано {result['total_messages']} сообщений, проанализировано {result['analyzed_count']}\n\n"
-            f"Используйте команду /list для просмотра доступных дайджестов.",
-            reply_markup=reply_markup
+            f"Обработано {total_messages} сообщений, проанализировано {analyzed_count}\n\n"
+            f"Используйте команду /list для просмотра доступных дайджестов."
         )
-    else:
+        
+    except Exception as e:
+        logger.error(f"Ошибка при генерации дайджеста: {str(e)}", exc_info=True)
         await status_message.edit_text(
-            f"{status_message.text}\n\n❌ {result.get('message', 'Ошибка при генерации дайджеста')}"
+            f"{status_message.text}\n\n❌ Произошла ошибка: {str(e)}"
         )
-# В telegram_bot/handlers.py
-
-async def auto_update_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_manager):
-    """Обработчик команды /auto_update - включает/выключает авто-обновление дайджестов"""
-    user_id = update.effective_user.id
-    
-    # Проверяем состояние автообновления для этого пользователя
-    auto_update_enabled = context.bot_data.get(f"auto_update_{user_id}", False)
-    
-    if auto_update_enabled:
-        # Отключаем автообновление
-        context.bot_data[f"auto_update_{user_id}"] = False
-        
-        # Удаляем задачу, если она есть
-        job_name = f"auto_update_{user_id}"
-        current_jobs = context.job_queue.get_jobs_by_name(job_name)
-        for job in current_jobs:
-            job.schedule_removal()
-        
-        await update.message.reply_text("✅ Автоматическое обновление дайджестов отключено")
-    else:
-        # Включаем автообновление
-        context.bot_data[f"auto_update_{user_id}"] = True
-        
-        # Запускаем задачу обновления каждый час
-        job_name = f"auto_update_{user_id}"
-        context.job_queue.run_repeating(
-            lambda ctx: auto_update_job(ctx, db_manager, user_id),
-            interval=3600,  # 1 час
-            first=300,      # Первый запуск через 5 минут
-            name=job_name
-        )
-        
-        await update.message.reply_text(
-            "✅ Автоматическое обновление дайджестов включено. "
-            "Дайджесты будут обновляться каждый час при появлении новых сообщений. "
-            "Для отключения используйте снова /auto_update"
-        )
-
-async def auto_update_job(context, db_manager, user_id):
-    """Задача автоматического обновления дайджестов"""
-    from utils.digest_engine import check_and_update_digests
-    
-    update_result = await check_and_update_digests(db_manager)
-    
-    if update_result.get("updated_digests", []):
-        # Если были обновления, отправляем уведомление пользователю
-        await context.bot.send_message(
-            user_id,
-            f"✅ Дайджесты обновлены: {len(update_result['updated_digests'])} шт.\n"
-            "Используйте /list для просмотра доступных дайджестов."
-        )        
