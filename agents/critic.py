@@ -7,7 +7,7 @@ import os
 from datetime import datetime
 from crewai import Agent
 from langchain.tools import Tool
-
+from utils.learning_manager import LearningExamplesManager
 from config.settings import CATEGORIES
 from concurrent.futures import ThreadPoolExecutor
 import concurrent.futures
@@ -15,8 +15,6 @@ import concurrent.futures
 logger = logging.getLogger(__name__)
 
 class CriticAgent:
-    """Агент для проверки и исправления категоризации сообщений"""
-    
     def __init__(self, db_manager, llm_model=None):
         """
         Инициализация агента
@@ -30,6 +28,9 @@ class CriticAgent:
         # Импорт здесь, чтобы избежать циклических импортов
         from llm.gemma_model import GemmaLLM
         self.llm_model = llm_model or GemmaLLM()
+        
+        # Инициализируем менеджер обучающих примеров
+        self.learning_manager = LearningExamplesManager()
         
         # Создаем инструмент для проверки категоризации
         review_tool = Tool(
@@ -47,6 +48,18 @@ class CriticAgent:
             verbose=True,
             tools=[review_tool]
         )
+    def _save_learning_example(self, text, category, justification):
+        """Сохраняет примеры для обучения аналитика"""
+        try:
+            # Используем менеджер обучающих примеров
+            success = self.learning_manager.save_example(text, category, justification)
+            if success:
+                logger.info(f"Сохранен обучающий пример для категории '{category}'")
+            return success
+        except Exception as e:
+            logger.error(f"Не удалось сохранить обучающий пример: {str(e)}")
+            return False
+        
     def review_categorization_batch(self, messages_batch):
         """
         Обработка пакета сообщений
@@ -252,25 +265,4 @@ class CriticAgent:
             "errors": errors,
             "details": all_results
         }
-    
-    # В класс CriticAgent добавьте:
-    def _save_learning_example(self, text, category, justification):
-        """Сохраняет примеры для обучения аналитика"""
-        try:
-            # Создаем директорию, если ее нет
-            examples_dir = "learning_examples"
-            os.makedirs(examples_dir, exist_ok=True)
-            
-            # Сохраняем пример в JSONL-формате
-            with open(f"{examples_dir}/examples.jsonl", "a", encoding="utf-8") as f:
-                example = {
-                    "text": text, 
-                    "category": category,
-                    "justification": justification,
-                    "timestamp": datetime.now().isoformat()
-                }
-                f.write(json.dumps(example, ensure_ascii=False) + "\n")
-                
-            logger.info(f"Сохранен обучающий пример для категории '{category}'")
-        except Exception as e:
-            logger.error(f"Не удалось сохранить обучающий пример: {str(e)}")
+   

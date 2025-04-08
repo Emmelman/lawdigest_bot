@@ -8,20 +8,15 @@ from langchain.tools import Tool
 from crewai import Agent, Task
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config.settings import CATEGORIES
-
+import datetime
+import time
+from utils.learning_manager import LearningExamplesManager
 logger = logging.getLogger(__name__)
 
+
 class AnalyzerAgent:
-    """Агент для анализа и классификации сообщений"""
-    
     def __init__(self, db_manager, llm_model=None):
-        """
-        Инициализация агента
-        
-        Args:
-            db_manager (DatabaseManager): Менеджер БД
-            llm_model (QwenLLM, optional): Модель для обработки текста
-        """
+        """Инициализация агента"""
         self.db_manager = db_manager
         
         # Импорт здесь, чтобы избежать циклических импортов
@@ -30,6 +25,9 @@ class AnalyzerAgent:
         
         # Флаг для быстрой проверки критиком сообщений с низкой уверенностью
         self.fast_check = False
+        
+        # Инициализируем менеджер обучающих примеров
+        self.learning_manager = LearningExamplesManager()
         
         # Создаем инструмент для анализа сообщений
         analyze_tool = Tool(
@@ -58,8 +56,9 @@ class AnalyzerAgent:
         Returns:
             tuple: (категория сообщения, уровень уверенности 1-5)
         """
-        examples = self._load_learning_examples(limit=5)  # Ограничиваем 5 примерами
-    
+        # Получаем примеры из менеджера вместо загрузки с диска
+        examples = self.learning_manager.get_examples(limit=5)
+        
         # Формируем текст с примерами
         examples_text = ""
         if examples:
@@ -146,13 +145,6 @@ class AnalyzerAgent:
     def analyze_messages(self, limit=50, batch_size=10):
         """
         Инструмент для анализа и классификации сообщений с оценкой уверенности
-        
-        Args:
-            limit (int): Максимальное количество сообщений для анализа
-            batch_size (int): Размер пакета для обработки
-            
-        Returns:
-            dict: Результаты анализа
         """
         logger.info(f"Запуск анализа сообщений, лимит: {limit}, размер пакета: {batch_size}")
         
@@ -180,38 +172,59 @@ class AnalyzerAgent:
             future_to_batch = {}
             
             # Функция для обработки одного пакета
-            def process_batch(batch):
+            def process_batch(batch_idx, batch):
+                batch_start_time = time.time()
+                logger.info(f"Начало обработки пакета {batch_idx+1}/{len(batches)}")
+                
                 batch_results = []
-                for msg in batch:
+                for msg_idx, msg in enumerate(batch):
                     if not msg.text:
                         continue
+                    
                     try:
+                        msg_start_time = time.time()
+                        # Сокращаем текст сообщения, если он слишком длинный
+                        msg_text = msg.text
+                        if len(msg_text) > 2000:
+                            msg_text = msg_text[:2000] + "... [сокращено]"
+                            logger.debug(f"Сообщение {msg.id} сокращено с {len(msg.text)} до 2000 символов")
+                        
                         # Классифицируем сообщение
-                        category, confidence = self._classify_message(msg.text)
+                        category, confidence = self._classify_message(msg_text)
+                        
+                        msg_elapsed = time.time() - msg_start_time
+                        logger.debug(f"Сообщение {msg_idx+1}/{len(batch)} в пакете {batch_idx+1} обработано за {msg_elapsed:.2f}с: {category} ({confidence})")
                         
                         # Создаем результат для этого сообщения
                         result = {
                             "message_id": msg.id,
                             "category": category,
                             "confidence": confidence,
-                            "success": True
+                            "success": True,
+                            "processing_time": msg_elapsed
                         }
                         
                         # Если включена быстрая проверка и нужен дополнительный анализ
-                        if hasattr(self, 'fast_check') and self.fast_check and (category == "другое" or confidence <= 2):
+                        if self.fast_check and (category == "другое" or confidence <= 2):
                             try:
+                                critic_start = time.time()
                                 from agents.critic import CriticAgent
                                 critic = CriticAgent(self.db_manager)
                                 critic_result = critic.review_categorization(msg.id, category)
+                                
+                                critic_elapsed = time.time() - critic_start
+                                logger.debug(f"Критик проверил сообщение за {critic_elapsed:.2f}с")
                                 
                                 # Если критик изменил категорию, используем его результат
                                 if critic_result["status"] == "updated":
                                     result["category"] = critic_result["new_category"]
                                     result["confidence"] = critic_result["confidence"]
                                     result["reviewed_by_critic"] = True
+                                    result["critic_time"] = critic_elapsed
                             except Exception as e:
                                 logger.error(f"Ошибка при быстрой проверке сообщения {msg.id}: {str(e)}")
                     except Exception as e:
+                        logger.error(f"Ошибка при классификации сообщения {msg.id}: {str(e)}")
                         result = {
                             "message_id": msg.id,
                             "error": str(e),
@@ -219,11 +232,14 @@ class AnalyzerAgent:
                         }
                     
                     batch_results.append(result)
+                
+                batch_elapsed = time.time() - batch_start_time
+                logger.info(f"Завершена обработка пакета {batch_idx+1}/{len(batches)} за {batch_elapsed:.2f}с")
                 return batch_results
             
             # Запускаем задачи на обработку пакетов
             for i, batch in enumerate(batches):
-                future = executor.submit(process_batch, batch)
+                future = executor.submit(process_batch, i, batch)
                 future_to_batch[future] = i
             
             # Обрабатываем результаты
@@ -233,7 +249,13 @@ class AnalyzerAgent:
                 try:
                     batch_results = future.result()
                     all_results.extend(batch_results)
-                    logger.info(f"Обработан пакет {batch_idx+1}/{len(batches)}")
+                    
+                    # Вычисляем статистику по этому пакету
+                    batch_success = sum(1 for r in batch_results if r["success"])
+                    batch_times = [r.get("processing_time", 0) for r in batch_results if "processing_time" in r]
+                    avg_time = sum(batch_times) / len(batch_times) if batch_times else 0
+                    
+                    logger.info(f"Обработан пакет {batch_idx+1}/{len(batches)}: {batch_success} успешно, среднее время: {avg_time:.2f}с")
                 except Exception as e:
                     logger.error(f"Ошибка при обработке пакета {batch_idx+1}: {str(e)}")
         
@@ -403,10 +425,26 @@ class AnalyzerAgent:
     # В методе _load_learning_examples в файле agents/analyzer.py:
 
     def _load_learning_examples(self, limit=10):
-        """Загружает примеры для улучшения классификации"""
+        """Загружает примеры для улучшения классификации с использованием кэша"""
+        # Если кэш уже существует и не устарел (менее 5 минут), используем его
+        current_time = datetime.now()
+        if (self._examples_cache is not None and 
+            self._examples_cache_timestamp is not None and
+            (current_time - self._examples_cache_timestamp).total_seconds() < 300):
+            
+            logger.debug("Используем кэшированные примеры обучения")
+            return self._examples_cache[:limit]
+        
+        # Если кэш устарел или отсутствует, загружаем примеры с диска
+        self._examples_cache = self._load_learning_examples_from_disk(limit=20)
+        self._examples_cache_timestamp = current_time
+        
+        return self._examples_cache[:limit]
+    def _load_learning_examples_from_disk(self, limit=20):
+        """Непосредственная загрузка примеров с диска"""
         examples_path = "learning_examples/examples.jsonl"
         if not os.path.exists(examples_path):
-            logger.info("Файл с обучающими примерами не найден")
+            logger.debug("Файл с обучающими примерами не найден")
             return []
         
         examples = []
@@ -416,12 +454,11 @@ class AnalyzerAgent:
                 # Берем последние примеры, ограниченные лимитом
                 for line in lines[-limit:]:
                     examples.append(json.loads(line))
-            logger.info(f"Загружено {len(examples)} обучающих примеров")
+            logger.debug(f"Загружено {len(examples)} обучающих примеров")
             return examples
         except Exception as e:
             logger.error(f"Ошибка при загрузке обучающих примеров: {str(e)}")
-            return []
-        
+            return []    
     def create_task(self):
         """
         Создание задачи для агента

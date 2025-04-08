@@ -75,7 +75,24 @@ class DigestSection(Base):
     
     def __repr__(self):
         return f"<DigestSection(id={self.id}, category='{self.category}')>"
+# В database/models.py добавим:
 
+# В database/models.py добавим:
+
+class DigestGeneration(Base):
+    """Модель для хранения информации о генерации дайджестов"""
+    __tablename__ = "digest_generations"
+    
+    id = Column(Integer, primary_key=True)
+    timestamp = Column(DateTime, nullable=False, default=datetime.now)  # Время генерации
+    start_date = Column(DateTime, nullable=True)  # Начало периода
+    end_date = Column(DateTime, nullable=True)  # Конец периода
+    source = Column(String(50), nullable=False)  # Источник запуска: 'bot', 'scheduler', 'manual'
+    user_id = Column(Integer, nullable=True)  # ID пользователя (если запущено из бота)
+    channels = Column(Text, nullable=True)  # JSON строка с каналами
+    focus_category = Column(String(100), nullable=True)  # Фокус на категорию
+    messages_count = Column(Integer, default=0)  # Количество собранных сообщений
+    digest_ids = Column(Text, nullable=True)  # JSON строка с ID сгенерированных дайджестов
 
 def init_db(engine_url):
     """Инициализация базы данных"""

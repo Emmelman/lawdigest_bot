@@ -207,16 +207,9 @@ class DigesterAgent:
     def _generate_brief_section(self, category, messages):
         """
         Генерация краткого обзора по категории с заголовками и ссылками
-        
-        Args:
-            category (str): Категория сообщений
-            messages (list): Список сообщений этой категории
-            
-        Returns:
-            str: Текст краткого обзора по категории
         """
         logger.info(f"Начало генерации краткого обзора для категории '{category}'. Получено {len(messages)} сообщений.")
-    
+
         if not messages:
             return f"За данный период новостей по категории '{category}' не обнаружено."
         
@@ -258,8 +251,6 @@ class DigesterAgent:
                 else:
                     # Если msg не является объектом сообщения, логируем и пропускаем
                     logger.warning(f"Элемент в списке сообщений категории '{category}' не является объектом Message: {type(msg)}")
-                    if isinstance(msg, str):
-                        logger.warning(f"Содержимое строки: '{msg}'")
             except Exception as e:
                 logger.error(f"Ошибка при обработке сообщения для категории '{category}': {str(e)}")
         
@@ -283,16 +274,12 @@ class DigesterAgent:
             'поправки к законам': "Изменения в существующих законах",
             'другое': "Другие правовые новости и информация"
         }
-        def clean_numbering(text):
-            # Удаляем лишние экранирования точек после цифр
-            return re.sub(r'(\d+)\\\.\s*', r'\1. ', text)
         
         description = category_descriptions.get(category, "")
         if description:
             section_text += f"{description}:\n\n"
         
-                # Добавляем все сообщения, включая те, где нет ссылок
-        # Не ограничиваем количество, показываем все
+        # Добавляем все сообщения, включая те, где нет ссылок
         for idx, item in enumerate(all_items):
             formatted_date = item["date"].strftime("%d.%m.%Y")
             channel_name = item["channel"]
@@ -302,35 +289,43 @@ class DigesterAgent:
             annotation = self._generate_short_annotation(message.text)
 
             if item["has_url"]:
-                # Если есть настоящая ссылка, используем markdown-формат с жирным шрифтом для номера
-                section_text += f"<b>{idx+1}.</b> <a href='{item['url']}'>{item['title']}</a> - {channel_name}, {formatted_date}\n{annotation}\n\n"
+                # Если есть настоящая ссылка, используем HTML-формат
+                section_text += f"<b>{idx+1}.</b> <a href='{item['url']}'>{item['title']}</a> - {channel_name}, {formatted_date}\n<i>{annotation}</i>\n\n"
             else:
-                # Если нет ссылки, просто выводим текст с жирным шрифтом для номера и заголовка
-                section_text += f"<b>{idx+1}.</b> <b>{item['title']}</b> - {channel_name}, {formatted_date}\n{annotation}\n\n"
+                # Если нет ссылки, просто выводим текст с HTML-форматированием
+                section_text += f"<b>{idx+1}.</b> <b>{item['title']}</b> - {channel_name}, {formatted_date}\n<i>{annotation}</i>\n\n"
         
         # Добавляем ссылку на полный обзор
         section_text += f"\n[Открыть полный обзор по категории '{category}'](/category/{category})\n"
-       
-        section_text = clean_numbering(section_text)
-        return section_text
     
-    def _generate_short_annotation(self, text, max_length=100):
+        # Удаляем лишние экранирования точек после цифр
+        section_text = re.sub(r'(\d+)\\\.\s*', r'\1. ', section_text)
+        return section_text
+
+    def _generate_short_annotation(self, text, max_length=150):
         """
         Генерация краткой аннотации сообщения
         """
-        # Удаляем URL из текста
+        # Удаляем URL и лишние пробелы
         text = re.sub(r'https?://\S+', '', text)
+        text = re.sub(r'\s+', ' ', text).strip()
         
-        # Берем первые предложения
-        sentences = text.split('. ')
-        annotation = ''
-        for sentence in sentences:
-            if len(annotation) + len(sentence) <= max_length:
-                annotation += sentence + '. '
+        # Берем только первое предложение
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        first_sentence = sentences[0] if sentences else text
+        
+        # Если предложение слишком длинное, обрезаем
+        if len(first_sentence) > max_length:
+            # Ищем последнюю точку перед лимитом
+            last_period = first_sentence[:max_length].rfind('.')
+            if last_period > max_length // 2:  # Если точка найдена во второй половине
+                first_sentence = first_sentence[:last_period+1]
             else:
-                break
+                # Если точка не найдена или слишком в начале, обрезаем по словам
+                words = first_sentence[:max_length].split()
+                first_sentence = ' '.join(words[:-1]) + '...'
         
-        return annotation.strip() + '...' if len(annotation) < len(text) else annotation
+        return first_sentence
     
     def _generate_detailed_section(self, category, messages):
         """

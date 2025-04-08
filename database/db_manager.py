@@ -9,8 +9,7 @@ from sqlalchemy.orm import sessionmaker, scoped_session
 from datetime import datetime, timedelta
 import json
 from sqlalchemy import or_, and_
-from .models import Base, Message, Digest, DigestSection, init_db
-
+from .models import Base, Message, Digest, DigestSection, DigestGeneration, init_db
 logger = logging.getLogger(__name__)
 
 class DatabaseManager:
@@ -480,12 +479,15 @@ class DatabaseManager:
         finally:
             session.close()
 
-    def get_digest_by_date_with_sections(self, date):
+    # Изменения в database/db_manager.py
+
+    def get_digest_by_date_with_sections(self, date, generate_if_missing=True):
         """
         Получение дайджеста по дате со всеми секциями
         
         Args:
             date (datetime): Дата дайджеста
+            generate_if_missing (bool): Генерировать новый дайджест, если не найден
             
         Returns:
             dict: Данные о дайджесте и его секциях
@@ -504,6 +506,34 @@ class DatabaseManager:
                 Digest.date >= start_date,
                 Digest.date < end_date
             ).first()
+            
+            if not digest and generate_if_missing:
+                # Проверяем, есть ли сообщения за указанную дату
+                messages = self.get_messages_by_date_range(start_date, end_date)
+                
+                if not messages:
+                    logger.warning(f"Нет сообщений за дату {start_date.strftime('%Y-%m-%d')}, невозможно сгенерировать дайджест")
+                    return None
+                
+                logger.info(f"Найдено {len(messages)} сообщений за {start_date.strftime('%Y-%m-%d')}, генерируем дайджест")
+                
+                # Импортируем здесь, чтобы избежать циклического импорта
+                from agents.digester import DigesterAgent
+                
+                # Создаем дайджестер и генерируем дайджест
+                digester = DigesterAgent(self)
+                result = digester.create_digest(date=start_date, days_back=1)
+                
+                if result and "brief_digest_id" in result:
+                    # Получаем новый дайджест
+                    digest = session.query(Digest).options(
+                        joinedload(Digest.sections)
+                    ).filter_by(id=result["brief_digest_id"]).first()
+                    
+                    logger.info(f"Сгенерирован новый дайджест (ID: {digest.id if digest else 'unknown'})")
+                else:
+                    logger.error("Не удалось сгенерировать дайджест")
+                    return None
             
             if not digest:
                 return None
@@ -531,6 +561,7 @@ class DatabaseManager:
             return None
         finally:
             session.close()
+
     def save_digest_with_parameters(self, date, text, sections, digest_type="brief", 
                               date_range_start=None, date_range_end=None, 
                               focus_category=None, channels_filter=None, 
@@ -872,4 +903,54 @@ class DatabaseManager:
             return []
         finally:
             session.close()                                       
-                       
+    # В database/db_manager.py:
+
+    def save_digest_generation(self, source, user_id=None, channels=None, messages_count=0, digest_ids=None):
+        """Сохраняет информацию о генерации дайджеста"""
+        session = self.Session()
+        try:
+            generation = DigestGeneration(
+                timestamp=datetime.now(),
+                source=source,
+                user_id=user_id,
+                channels=json.dumps(channels) if channels else None,
+                messages_count=messages_count,
+                digest_ids=json.dumps(digest_ids) if digest_ids else None
+            )
+            session.add(generation)
+            session.commit()
+            return generation.id
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Ошибка при сохранении информации о генерации дайджеста: {str(e)}")
+            return None
+        finally:
+            session.close()
+
+    def get_last_digest_generation(self, source=None, user_id=None):
+        """Получает информацию о последней генерации дайджеста"""
+        session = self.Session()
+        try:
+            query = session.query(DigestGeneration).order_by(DigestGeneration.timestamp.desc())
+            
+            if source:
+                query = query.filter(DigestGeneration.source == source)
+            
+            if user_id:
+                query = query.filter(DigestGeneration.user_id == user_id)
+                
+            generation = query.first()
+            return {
+                "id": generation.id,
+                "timestamp": generation.timestamp,
+                "source": generation.source,
+                "user_id": generation.user_id,
+                "channels": json.loads(generation.channels) if generation.channels else None,
+                "messages_count": generation.messages_count,
+                "digest_ids": json.loads(generation.digest_ids) if generation.digest_ids else None
+            } if generation else None
+        except Exception as e:
+            logger.error(f"Ошибка при получении информации о последней генерации дайджеста: {str(e)}")
+            return None
+        finally:
+            session.close()                   

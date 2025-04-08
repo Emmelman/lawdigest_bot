@@ -146,6 +146,8 @@ async def create_digest(db_manager, llm_model, days_back=1):
     logger.info(f"Дайджест создан: {digest.get('status', 'unknown')}")
     return digest
 
+# Обновление в main.py
+
 async def run_full_workflow(days_back=1):
     """Запуск полного рабочего процесса с уверенностью и оптимизацией"""
     logger.info(f"Запуск оптимизированного рабочего процесса за последние {days_back} дней...")
@@ -163,11 +165,11 @@ async def run_full_workflow(days_back=1):
         # Шаг 1: Параллельный сбор данных
         logger.info("Шаг 1: Параллельный сбор данных")
         from agents.data_collector import DataCollectorAgent
-        
         collector = DataCollectorAgent(db_manager)
-        # Изменяем вызов, чтобы использовать асинхронную версию напрямую
-        collect_result = await collector._collect_all_channels_parallel(days_back=days_back)
-        total_messages = sum(collect_result.values())
+        
+        # Прямой вызов асинхронного метода
+        collect_result = await collector.collect_data(days_back=days_back)
+        total_messages = collect_result.get("total_new_messages", 0)
         
         logger.info(f"Всего собрано {total_messages} новых сообщений")
         
@@ -178,28 +180,25 @@ async def run_full_workflow(days_back=1):
             if not existing_messages:
                 logger.info("Нет сообщений с категориями. Завершение работы.")
                 return False
-        else:
-            # Шаг 2: Анализ сообщений с оценкой уверенности
-            logger.info("Шаг 2: Анализ сообщений с оценкой уверенности")
-            from agents.analyzer import AnalyzerAgent
-            
-            analyzer = AnalyzerAgent(db_manager, qwen_model)
-            analyzer.fast_check = True  # Включаем быструю проверку для сообщений с низкой уверенностью
-            analyze_result = analyzer.analyze_messages(
-                limit=total_messages, 
-                batch_size=5
-            )
-            
-            analyzed_count = analyze_result.get("analyzed_count", 0)
-            confidence_stats = analyze_result.get("confidence_stats", {})
-            
-            logger.info(f"Проанализировано {analyzed_count} сообщений")
-            logger.info(f"Распределение по уровням уверенности: {confidence_stats}")
         
-        # Шаг 3: Проверка категоризации сообщений с низкой уверенностью
+        # Шаг 2: Анализ сообщений
+        logger.info("Шаг 2: Анализ сообщений с оценкой уверенности")
+        from agents.analyzer import AnalyzerAgent
+        analyzer = AnalyzerAgent(db_manager, qwen_model)
+        analyzer.fast_check = True  # Включаем быструю проверку
+        analyze_result = analyzer.analyze_messages(
+            limit=max(total_messages, 30), 
+            batch_size=5
+        )
+        
+        analyzed_count = analyze_result.get("analyzed_count", 0)
+        confidence_stats = analyze_result.get("confidence_stats", {})
+        
+        logger.info(f"Проанализировано {analyzed_count} сообщений")
+        logger.info(f"Распределение по уровням уверенности: {confidence_stats}")
+        
+        # Шаг 3: Проверка категоризации
         logger.info("Шаг 3: Проверка категоризации сообщений с низкой уверенностью")
-        from agents.critic import CriticAgent
-        
         critic = CriticAgent(db_manager)
         review_result = critic.review_recent_categorizations(
             confidence_threshold=2,  # Проверять только сообщения с уверенностью 1-2
@@ -214,7 +213,6 @@ async def run_full_workflow(days_back=1):
         # Шаг 4: Создание дайджеста
         logger.info("Шаг 4: Создание дайджеста")
         from agents.digester import DigesterAgent
-        
         digester = DigesterAgent(db_manager, gemma_model)
         digest_result = digester.create_digest(days_back=days_back)
         
