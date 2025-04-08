@@ -220,16 +220,67 @@ async def run_full_workflow(days_back=1):
         has_detailed = "detailed_digest_id" in digest_result
         
         if has_brief or has_detailed:
+            # Определяем период на основе days_back
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=days_back-1)
+
             logger.info(f"Дайджест успешно создан: краткий={has_brief}, подробный={has_detailed}")
+            if has_brief or has_detailed:
+                # Сохраняем информацию о генерации дайджеста
+                digest_ids = {}
+                if "brief_digest_id" in digest_result:
+                    digest_ids["brief"] = digest_result["brief_digest_id"]
+                if "detailed_digest_id" in digest_result:
+                    digest_ids["detailed"] = digest_result["detailed_digest_id"]
+                
+                db_manager.save_digest_generation(
+                source="workflow",
+                messages_count=total_messages,
+                digest_ids=digest_ids,
+                start_date=start_date,  # Добавить эти параметры
+                end_date=end_date       # из существующих переменных
+                )
             return True
         else:
             logger.error("Не удалось создать дайджест")
             return False
-    
+        
+        
     finally:
         # Закрываем соединение с Telegram
         await client.disconnect()
-
+async def shutdown(signal, loop, client=None, scheduler=None, bot=None):
+    """Корректное завершение приложения с закрытием всех подключений"""
+    logger.info(f"Получен сигнал {signal.name}, завершение работы...")
+    
+    # Сначала останавливаем планировщик если он существует
+    if scheduler:
+        logger.info("Останавливаем планировщик...")
+        scheduler.stop()
+    
+    # Останавливаем бота если он существует
+    if bot and hasattr(bot, 'application'):
+        logger.info("Останавливаем Telegram бота...")
+        await bot.application.stop()
+    
+    # Корректно закрываем Telethon клиент
+    if client:
+        logger.info("Закрываем подключение к Telegram API...")
+        # Важно использовать await для корректного закрытия
+        await client.disconnect()
+    
+    # Отмена всех задач
+    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    logger.info(f"Отмена {len(tasks)} задач...")
+    for task in tasks:
+        task.cancel()
+    
+    # Ожидаем завершения задач с обработкой исключений
+    await asyncio.gather(*tasks, return_exceptions=True)
+    
+    logger.info("Закрываем event loop...")
+    loop.stop()
+    
 def run_bot_with_scheduler():
     """Запуск бота с планировщиком задач"""
     logger.info("Запуск приложения в режиме бота с планировщиком")

@@ -304,28 +304,53 @@ class DigesterAgent:
 
     def _generate_short_annotation(self, text, max_length=150):
         """
-        Генерация краткой аннотации сообщения
+        Генерация краткой аннотации сообщения, избегая дублирования заголовка
         """
         # Удаляем URL и лишние пробелы
         text = re.sub(r'https?://\S+', '', text)
         text = re.sub(r'\s+', ' ', text).strip()
         
-        # Берем только первое предложение
-        sentences = re.split(r'(?<=[.!?])\s+', text)
-        first_sentence = sentences[0] if sentences else text
+        # Разбиваем на абзацы
+        paragraphs = text.split('\n\n')
+        
+        # Ищем содержательный абзац, отличный от заголовка
+        first_paragraph = paragraphs[0] if paragraphs else ""
+        content_paragraph = None
+        
+        # Ищем первый неявляющийся заголовком абзац 
+        for paragraph in paragraphs[1:]:
+            # Пропускаем короткие или служебные абзацы
+            clean_paragraph = paragraph.strip()
+            if len(clean_paragraph) < 30 or clean_paragraph.startswith("http") or "@" in clean_paragraph:
+                continue
+                
+            # Используем этот абзац для аннотации
+            content_paragraph = clean_paragraph
+            break
+        
+        # Если не нашли подходящий абзац, используем первый
+        if not content_paragraph:
+            if len(paragraphs) > 1 and len(paragraphs[1].strip()) > 20:
+                content_paragraph = paragraphs[1].strip()
+            else:
+                content_paragraph = first_paragraph
+        
+        # Берем только первое предложение для аннотации
+        sentences = re.split(r'(?<=[.!?])\s+', content_paragraph)
+        annotation = sentences[0] if sentences else content_paragraph
         
         # Если предложение слишком длинное, обрезаем
-        if len(first_sentence) > max_length:
+        if len(annotation) > max_length:
             # Ищем последнюю точку перед лимитом
-            last_period = first_sentence[:max_length].rfind('.')
+            last_period = annotation[:max_length].rfind('.')
             if last_period > max_length // 2:  # Если точка найдена во второй половине
-                first_sentence = first_sentence[:last_period+1]
+                annotation = annotation[:last_period+1]
             else:
                 # Если точка не найдена или слишком в начале, обрезаем по словам
-                words = first_sentence[:max_length].split()
-                first_sentence = ' '.join(words[:-1]) + '...'
+                words = annotation[:max_length].split()
+                annotation = ' '.join(words[:-1]) + '...'
         
-        return first_sentence
+        return annotation
     
     def _generate_detailed_section(self, category, messages):
         """
