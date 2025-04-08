@@ -202,8 +202,7 @@ class DataCollectorAgent:
             # Используем указанный диапазон дат
             messages = await self._get_channel_messages(channel, days_back=days_back, start_date=start_date, end_date=end_date)
         
-        # Строка ниже дублирует получение сообщений и игнорирует предыдущую логику - её нужно удалить
-        # messages = await self._get_channel_messages(channel, days_back=days_back)
+        
         
         new_messages_count = 0
         duplicates_count = 0
