@@ -185,6 +185,66 @@ class DataCollectorAgent:
         
         return new_messages_count
     
+    async def _process_channel(self, channel, start_date=None, end_date=None, days_back=1):
+        """
+        Обработка канала: получение и сохранение сообщений
+        
+        Args:
+            channel (str): Имя канала
+            start_date (datetime, optional): Начальная дата для сбора
+            end_date (datetime, optional): Конечная дата для сбора
+            days_back (int): За сколько дней назад собирать сообщения (используется, если start_date и end_date не указаны)
+        """
+        # Получаем сообщения с учетом указанных дат
+        if start_date is None or end_date is None:
+            messages = await self._get_channel_messages(channel, days_back=days_back)
+        else:
+            # Используем указанный диапазон дат
+            messages = await self._get_channel_messages(channel, days_back=days_back, start_date=start_date, end_date=end_date)
+        
+        # Строка ниже дублирует получение сообщений и игнорирует предыдущую логику - её нужно удалить
+        # messages = await self._get_channel_messages(channel, days_back=days_back)
+        
+        new_messages_count = 0
+        duplicates_count = 0
+        
+        for message in messages:
+            # Пропускаем сообщения без текста
+            if not message.message:
+                continue
+            
+            # Сохраняем сообщение в БД
+            try:
+                # Проверяем, существует ли уже такое сообщение в базе
+                existing_message = self.db_manager.get_message_by_channel_and_id(channel, message.id)
+                
+                if existing_message:
+                    duplicates_count += 1
+                    continue
+                
+                # Убедимся, что мы всегда сохраняем naive datetime
+                message_date = message.date
+                if message_date.tzinfo is not None:
+                    message_date = message_date.replace(tzinfo=None)
+                    
+                self.db_manager.save_message(
+                    channel=channel,
+                    message_id=message.id,
+                    text=message.message,
+                    date=message_date
+                )
+                new_messages_count += 1
+            except Exception as e:
+                logger.error(f"Ошибка при сохранении сообщения из канала {channel}: {str(e)}")
+        
+        logger.info(f"Канал {channel}: сохранено {new_messages_count} новых сообщений, "
+                f"пропущено {duplicates_count} дубликатов")
+        
+        return new_messages_count
+    
+    """
+    Оптимизированный метод для параллельного сбора данных из каналов
+    """
     async def _collect_all_channels_parallel(self, days_back=1, channels=None, specific_date=None):
         """
         Параллельный сбор данных со всех или указанных каналов
