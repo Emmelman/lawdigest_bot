@@ -6,7 +6,7 @@ from datetime import datetime, time
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-
+import asyncio
 from config.settings import (
     COLLECT_INTERVAL_MINUTES,
     ANALYZE_INTERVAL_MINUTES,
@@ -57,11 +57,13 @@ class JobScheduler:
                 verbose=True
             )
     
-    def collect_data_job(self):
+    async def collect_data_job(self):
         """Задача сбора данных"""
         logger.info("Запуск задачи сбора данных")
         try:
-            result = self.data_collector.collect_data()
+            # Используйте loop.run_until_complete для корутин
+            loop = asyncio.get_event_loop()
+            result = loop.run_until_complete(self.data_collector.collect_data())
             logger.info(f"Задача сбора данных завершена: {result}")
         except Exception as e:
             logger.error(f"Ошибка при выполнении задачи сбора данных: {str(e)}")

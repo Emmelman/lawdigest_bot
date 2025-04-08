@@ -9,6 +9,7 @@ from crewai import Agent, Task
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config.settings import CATEGORIES
 import datetime
+from datetime import datetime as dt
 import time
 from utils.learning_manager import LearningExamplesManager
 logger = logging.getLogger(__name__)
@@ -29,6 +30,11 @@ class AnalyzerAgent:
         # Инициализируем менеджер обучающих примеров
         self.learning_manager = LearningExamplesManager()
         
+        # Добавляем кэш примеров на уровне агента
+        self._examples_cache = None
+        self._examples_cache_timestamp = None
+        self._examples_cache_ttl = 1800  # 30 минут TTL для кэша
+
         # Создаем инструмент для анализа сообщений
         analyze_tool = Tool(
             name="analyze_messages",
@@ -56,9 +62,23 @@ class AnalyzerAgent:
         Returns:
             tuple: (категория сообщения, уровень уверенности 1-5)
         """
-        # Получаем примеры из менеджера вместо загрузки с диска
-        examples = self.learning_manager.get_examples(limit=5)
-        
+        # Используем кэшированные примеры вместо обращения к менеджеру для каждого сообщения
+        current_time = dt.now()
+
+        # Инициализируем кэш, если он пустой
+        if self._examples_cache is None:
+            self._examples_cache = self.learning_manager.get_examples(limit=5)
+            self._examples_cache_timestamp = current_time
+            logger.debug("Инициализирован кэш примеров для классификации")
+        # Обновляем кэш, только если истек TTL
+        elif (current_time - self._examples_cache_timestamp).total_seconds() > self._examples_cache_ttl:
+            self._examples_cache = self.learning_manager.get_examples(limit=5)
+            self._examples_cache_timestamp = current_time
+            logger.debug("Обновлен кэш примеров для классификации")
+
+        # Используем кэшированные примеры
+        examples = self._examples_cache
+
         # Формируем текст с примерами
         examples_text = ""
         if examples:
@@ -300,7 +320,14 @@ class AnalyzerAgent:
             dict: Результаты анализа
         """
         logger.info(f"Запуск анализа сообщений с оптимизацией, лимит: {limit}")
-        
+       
+        # Предварительно загружаем примеры один раз для всех сообщений в пакете
+        current_time = dt.now()
+        if self._examples_cache is None or (current_time - self._examples_cache_timestamp).total_seconds() > self._examples_cache_ttl:
+            self._examples_cache = self.learning_manager.get_examples(limit=5) 
+            self._examples_cache_timestamp = current_time
+            logger.info("Загружены обучающие примеры для пакетного анализа")
+
         # Получаем непроанализированные сообщения
         unanalyzed = self.db_manager.get_unanalyzed_messages(limit=limit)
         
@@ -427,7 +454,7 @@ class AnalyzerAgent:
     def _load_learning_examples(self, limit=10):
         """Загружает примеры для улучшения классификации с использованием кэша"""
         # Если кэш уже существует и не устарел (менее 5 минут), используем его
-        current_time = datetime.now()
+        current_time = dt.now()
         if (self._examples_cache is not None and 
             self._examples_cache_timestamp is not None and
             (current_time - self._examples_cache_timestamp).total_seconds() < 300):

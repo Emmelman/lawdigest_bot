@@ -119,73 +119,92 @@ class LearningExamplesManager:
     def get_examples(self, category=None, limit=5):
         """
         Возвращает примеры для указанной категории или все примеры
-        с оптимизацией размера данных
+        с оптимизацией производительности
+        
+        Args:
+            category (str, optional): Категория для фильтрации примеров
+            limit (int): Максимальное количество примеров
+            
+        Returns:
+            list: Список оптимизированных примеров
         """
-        with self.lock:
-            # Если кэш устарел (более 5 минут), перезагружаем примеры
-            current_time = datetime.now()
-            if self.last_loaded is None or (current_time - self.last_loaded).total_seconds() > 300:
-                logger.debug("Перезагрузка примеров из-за устаревшего кэша")
-                self._load_examples()
-            else:
-                logger.debug("Использование кэша примеров")
+        # Проверяем, нужно ли обновить кэш (увеличено до 30 минут)
+        current_time = datetime.now()
+        cache_needs_update = (self.last_loaded is None or 
+                            (current_time - self.last_loaded).total_seconds() > 1800)  # 30 минут
+        
+        # Блокируем только если требуется обновление кэша
+        if cache_needs_update:
+            with self.lock:
+                # Повторная проверка после получения блокировки
+                if self.last_loaded is None or (current_time - self.last_loaded).total_seconds() > 1800:
+                    self._load_examples()
+        
+        # Проверяем наличие категории в кэше - этот блок не требует блокировки
+        if category and category in self.examples_by_category:
+            # Быстрый путь - возвращаем последние примеры из указанной категории
+            raw_examples = self.examples_by_category[category][-limit:]
+        elif category is None:
+            # Получаем примеры из всех категорий (оптимизированная логика)
+            raw_examples = []
+            categories = list(self.examples_by_category.keys())
             
-            # Получаем примеры
-            if category and category in self.examples_by_category:
-                # Берем последние примеры из указанной категории
-                raw_examples = self.examples_by_category[category][-limit:]
-            elif category is None:
-                # Берем примеры из всех категорий с равномерным распределением
-                raw_examples = []
-                categories = list(self.examples_by_category.keys())
-                examples_per_category = max(1, limit // len(categories)) if categories else 0
-                
-                for cat in categories:
-                    cat_examples = self.examples_by_category[cat]
-                    raw_examples.extend(cat_examples[-examples_per_category:])
-                
-                # Если мест еще осталось, добавляем из наиболее заполненных категорий
-                while len(raw_examples) < limit and categories:
-                    # Находим категорию с наибольшим числом примеров
-                    max_cat = max(categories, key=lambda c: len(self.examples_by_category[c]))
-                    if self.examples_by_category[max_cat]:
-                        # Добавляем еще один пример из этой категории
-                        used_indices = [raw_examples.index(ex) for ex in raw_examples if ex in self.examples_by_category[max_cat]]
-                        available = [ex for i, ex in enumerate(self.examples_by_category[max_cat]) 
-                                    if i not in used_indices]
-                        
-                        if available:
-                            raw_examples.append(available[-1])
-                        
-                        # Удаляем категорию из списка, если все примеры уже использованы
-                        if len(used_indices) >= len(self.examples_by_category[max_cat]):
-                            categories.remove(max_cat)
-                    else:
-                        categories.remove(max_cat)
-                
-                raw_examples = raw_examples[:limit]
-            else:
-                # Если категория указана, но не найдена
-                logger.warning(f"Запрошена несуществующая категория примеров: {category}")
+            if not categories:
                 return []
+                
+            # Определяем количество примеров из каждой категории
+            examples_per_category = max(1, limit // len(categories))
             
-            # Создаем копии примеров с оптимизированным размером
-            optimized_examples = []
-            for ex in raw_examples:
-                # Создаем копию примера
-                optimized = ex.copy()
-                
-                # Ограничиваем размер текста и обоснования
-                if len(optimized['text']) > 200:
-                    optimized['text'] = optimized['text'][:197] + '...'
-                
-                if 'justification' in optimized and len(optimized['justification']) > 100:
-                    optimized['justification'] = optimized['justification'][:97] + '...'
-                
-                optimized_examples.append(optimized)
+            # Сразу собираем базовое количество примеров
+            for cat in categories:
+                if cat in self.examples_by_category and self.examples_by_category[cat]:
+                    # Берем только последние примеры из каждой категории
+                    cat_examples = self.examples_by_category[cat][-examples_per_category:]
+                    raw_examples.extend(cat_examples)
             
-            logger.debug(f"Возвращено {len(optimized_examples)} примеров")
-            return optimized_examples
+            # Если собрали меньше чем нужно, дополняем
+            if len(raw_examples) < limit:
+                # Собираем категории с наибольшим количеством примеров
+                sorted_categories = sorted(
+                    categories, 
+                    key=lambda c: len(self.examples_by_category.get(c, [])),
+                    reverse=True
+                )
+                
+                # Добавляем примеры из категорий с наибольшим количеством примеров
+                for cat in sorted_categories:
+                    if len(raw_examples) >= limit:
+                        break
+                        
+                    # Находим примеры, которые ещё не добавлены
+                    used = set(id(ex) for ex in raw_examples if ex in self.examples_by_category.get(cat, []))
+                    available = [ex for ex in self.examples_by_category.get(cat, []) 
+                                if id(ex) not in used]
+                    
+                    # Добавляем нужное количество
+                    need_more = limit - len(raw_examples)
+                    raw_examples.extend(available[-need_more:] if need_more <= len(available) else available)
+            
+            # Обрезаем до нужного лимита
+            raw_examples = raw_examples[:limit]
+        else:
+            # Если категория указана, но не найдена - возвращаем пустой список
+            return []
+        
+        # Создаем оптимизированные копии примеров - без лишних циклов
+        optimized_examples = []
+        for ex in raw_examples:
+            # Оптимизируем копирование - копируем только нужные поля
+            optimized = {
+                'category': ex.get('category', ''),
+                'text': ex.get('text', '')[:200] + ('...' if len(ex.get('text', '')) > 200 else ''),
+                'justification': ex.get('justification', '')[:100] + ('...' if len(ex.get('justification', '')) > 100 else '')
+            }
+            
+            optimized_examples.append(optimized)
+        
+        # Возвращаем результат без лишнего логирования
+        return optimized_examples
     
     def _should_rotate_file(self) -> bool:
         """Проверяет, нужно ли создать новый файл примеров"""
@@ -219,3 +238,5 @@ class LearningExamplesManager:
         
         except Exception as e:
             logger.error(f"Ошибка при ротации файла примеров: {str(e)}")
+
+    

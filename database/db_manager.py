@@ -26,7 +26,7 @@ class DatabaseManager:
         self.session_factory = sessionmaker(bind=self.engine)
         self.Session = scoped_session(self.session_factory)
     
-    def save_message(self, channel, message_id, text, date):
+    def save_message(self, channel, message_id, text, date, force_update=False):
         """
         Сохранение сообщения из Telegram-канала
         
@@ -48,6 +48,13 @@ class DatabaseManager:
             
             if existing_message:
                 logger.debug(f"Сообщение {message_id} из канала {channel} уже существует")
+                # Обновляем текст сообщения, если включено force_update
+                if force_update:
+                    logger.info(f"Принудительное обновление текста сообщения {message_id} из канала {channel}")
+                    existing_message.text = text
+                    session.commit()
+                
+                
                 return existing_message
             
             # Создаем новое сообщение
@@ -722,6 +729,7 @@ class DatabaseManager:
                 return []
             finally:
                 session.close()
+    # В DatabaseManager, метод get_digests_containing_date
     def get_digests_containing_date(self, date):
         """
         Находит все дайджесты, которые включают указанную дату
@@ -729,6 +737,7 @@ class DatabaseManager:
         session = self.Session()
         try:
             results = []
+            logger.debug(f"Поиск дайджестов для даты {date.strftime('%Y-%m-%d')}")
             
             # Поиск дайджестов, у которых указан диапазон дат
             range_digests = session.query(Digest).filter(
@@ -737,15 +746,17 @@ class DatabaseManager:
                 Digest.date_range_start <= date,
                 Digest.date_range_end >= date
             ).all()
+            logger.debug(f"Найдено {len(range_digests)} дайджестов с диапазоном дат")
             
             # Поиск дайджестов за конкретную дату
+            day_start = datetime.combine(date.date(), datetime.min.time())
+            day_end = datetime.combine(date.date(), datetime.max.time())
+            
             single_day_digests = session.query(Digest).filter(
-                Digest.date == date,
-                or_(
-                    Digest.date_range_start == None,
-                    Digest.date_range_end == None
-                )
+                Digest.date >= day_start,
+                Digest.date <= day_end
             ).all()
+            logger.debug(f"Найдено {len(single_day_digests)} дайджестов за конкретную дату")
             
             # Объединяем результаты
             all_digests = range_digests + single_day_digests
@@ -762,6 +773,7 @@ class DatabaseManager:
                     "keywords_filter": json.loads(digest.keywords_filter) if digest.keywords_filter else None
                 })
             
+            logger.info(f"Всего найдено {len(results)} дайджестов, содержащих дату {date.strftime('%Y-%m-%d')}")
             return results
         except Exception as e:
             logger.error(f"Ошибка при поиске дайджестов, содержащих дату: {str(e)}")
@@ -905,7 +917,7 @@ class DatabaseManager:
             session.close()                                       
     # В database/db_manager.py:
 
-    def save_digest_generation(self, source, user_id=None, channels=None, messages_count=0, digest_ids=None):
+    def save_digest_generation(self, source, user_id=None, channels=None, messages_count=0, digest_ids=None, start_date=None, end_date=None, focus_category=None):
         """Сохраняет информацию о генерации дайджеста"""
         session = self.Session()
         try:
@@ -915,10 +927,14 @@ class DatabaseManager:
                 user_id=user_id,
                 channels=json.dumps(channels) if channels else None,
                 messages_count=messages_count,
-                digest_ids=json.dumps(digest_ids) if digest_ids else None
+                digest_ids=json.dumps(digest_ids) if digest_ids else None,
+                start_date=start_date,
+                end_date=end_date,
+                focus_category=focus_category
             )
             session.add(generation)
             session.commit()
+            logger.info(f"Создана запись о генерации дайджеста ID {generation.id}, источник: {source}")
             return generation.id
         except Exception as e:
             session.rollback()
