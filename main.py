@@ -148,7 +148,7 @@ async def create_digest(db_manager, llm_model, days_back=1):
 
 # Обновление в main.py
 
-async def run_full_workflow(days_back=1):
+async def run_full_workflow(days_back=1, force_update=False):
     """Запуск полного рабочего процесса с уверенностью и оптимизацией"""
     logger.info(f"Запуск оптимизированного рабочего процесса за последние {days_back} дней...")
     
@@ -168,18 +168,41 @@ async def run_full_workflow(days_back=1):
         collector = DataCollectorAgent(db_manager)
         
         # Прямой вызов асинхронного метода
-        collect_result = await collector.collect_data(days_back=days_back)
+        collect_result = await collector.collect_data(days_back=days_back, force_update=force_update)
         total_messages = collect_result.get("total_new_messages", 0)
         
         logger.info(f"Всего собрано {total_messages} новых сообщений")
         
         if total_messages == 0:
-            logger.info("Нет новых сообщений для анализа. Проверка на существующие сообщения с категориями...")
-            # Проверяем, есть ли уже сообщения с категориями
-            existing_messages = db_manager.get_recently_categorized_messages(1)
+            logger.info("Нет новых сообщений. Проверка существующих сообщений за указанный период...")
+            
+            # Определяем даты для поиска
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=days_back)
+            
+            # Проверяем все сообщения за период (не только категоризированные)
+            existing_messages = db_manager.get_messages_by_date_range(start_date, end_date)
+            
             if not existing_messages:
-                logger.info("Нет сообщений с категориями. Завершение работы.")
+                logger.info(f"Нет сообщений за указанный период ({start_date.strftime('%Y-%m-%d')} - {end_date.strftime('%Y-%m-%d')}). Завершение работы.")
                 return False
+            
+            logger.info(f"Найдено {len(existing_messages)} существующих сообщений за указанный период. Проверяем необходимость категоризации.")
+            
+            # Проверяем, сколько из них уже категоризировано
+            uncategorized = [msg for msg in existing_messages if msg.category is None]
+            
+            if uncategorized:
+                logger.info(f"Найдено {len(uncategorized)} некатегоризированных сообщений. Запускаем анализ...")
+                
+                # Запускаем категоризацию для некатегоризированных сообщений
+                analyzer = AnalyzerAgent(db_manager, qwen_model)
+                analyzer.fast_check = True
+                analyze_result = analyzer.analyze_messages(limit=len(uncategorized))
+                
+                logger.info(f"Завершена категоризация сообщений: {analyze_result.get('analyzed_count', 0)} обработано.")
+            else:
+                logger.info("Все существующие сообщения уже категоризированы.")
         
         # Шаг 2: Анализ сообщений
         logger.info("Шаг 2: Анализ сообщений с оценкой уверенности")
@@ -199,12 +222,18 @@ async def run_full_workflow(days_back=1):
         
         # Шаг 3: Проверка категоризации
         logger.info("Шаг 3: Проверка категоризации сообщений с низкой уверенностью")
+        
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days_back)
+
         critic = CriticAgent(db_manager)
         review_result = critic.review_recent_categorizations(
             confidence_threshold=2,  # Проверять только сообщения с уверенностью 1-2
             limit=50,
             batch_size=5,
-            max_workers=3
+            max_workers=3,
+            start_date=start_date,  # Передаем фильтр по дате
+            end_date=end_date
         )
         
         updated_count = review_result.get("updated", 0)

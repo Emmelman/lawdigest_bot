@@ -200,7 +200,7 @@ class CriticAgent:
                 "error": str(e)
             }
     
-    def review_recent_categorizations(self, confidence_threshold=3, limit=30, batch_size=5, max_workers=3):
+    def review_recent_categorizations(self, confidence_threshold=3, limit=30, batch_size=5, max_workers=3, start_date=None, end_date=None):
         """
         Проверяет категоризацию сообщений с низкой уверенностью
         
@@ -217,8 +217,10 @@ class CriticAgent:
         
         # Получаем сообщения с низкой уверенностью
         messages = self.db_manager.get_messages_with_low_confidence(
-            confidence_threshold=confidence_threshold, 
-            limit=limit
+        confidence_threshold=confidence_threshold, 
+        limit=limit,
+        start_date=start_date,
+        end_date=end_date
         )
         
         if not messages:

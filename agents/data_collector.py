@@ -54,7 +54,7 @@ class DataCollectorAgent:
             self.client = TelegramClient('session_name', self.api_id, self.api_hash)
             await self.client.start()
     
-    async def _get_channel_messages(self, channel, days_back=1, limit_per_request=100):
+    async def _get_channel_messages(self, channel, days_back=1, limit_per_request=100, start_date=None, end_date=None):
         """
         Получение сообщений из канала за указанный период
         """
@@ -62,7 +62,10 @@ class DataCollectorAgent:
         
         try:
             entity = await self.client.get_entity(channel)
-            
+            # Определение дат для фильтрации
+            if start_date is None or end_date is None:
+                end_date = datetime.now()
+                start_date = end_date - timedelta(days=days_back)
             # Определение дат для фильтрации - используем datetime без timezone
             end_date = datetime.now()
             start_date = end_date - timedelta(days=days_back)
@@ -130,8 +133,9 @@ class DataCollectorAgent:
         except Exception as e:
             logger.error(f"Ошибка при получении сообщений из канала {channel}: {str(e)}")
             return []
+      
     
-    async def _get_channel_messages(self, channel, days_back=1, limit_per_request=100, start_date=None, end_date=None):
+    async def _process_channel(self, channel, start_date=None, end_date=None, days_back=1, force_update=False):
         """
         Обработка канала: получение и сохранение сообщений
         
@@ -139,122 +143,104 @@ class DataCollectorAgent:
             channel (str): Имя канала
             start_date (datetime, optional): Начальная дата для сбора
             end_date (datetime, optional): Конечная дата для сбора
-            days_back (int): За сколько дней назад собирать сообщения (используется, если start_date и end_date не указаны)
+            days_back (int): За сколько дней назад собирать сообщения 
+            force_update (bool): Принудительно обрабатывать все сообщения
         """
+        # Получаем сообщения с учетом дат
         if start_date is None or end_date is None:
             messages = await self._get_channel_messages(channel, days_back=days_back)
         else:
-            # Используем указанный диапазон дат
-            messages = await self._get_channel_messages(channel, start_date=start_date, end_date=end_date)
+            messages = await self._get_channel_messages(
+                channel, days_back=days_back, start_date=start_date, end_date=end_date
+            )
         
-        messages = await self._get_channel_messages(channel, days_back=days_back)
-        new_messages_count = 0
-        duplicates_count = 0
+        # Если нет принудительного обновления, фильтруем существующие сообщения
+        existing_ids = []
+        if not force_update:
+            # Получаем существующие ID - используем имеющийся метод
+            existing_messages = []
+            for msg in messages:
+                existing = self.db_manager.get_message_by_channel_and_id(channel, msg.id)
+                if existing:
+                    existing_ids.append(msg.id)
         
-        for message in messages:
+        # Фильтруем сообщения - оставляем только новые или все при force_update
+        filtered_messages = [msg for msg in messages if force_update or msg.id not in existing_ids]
+        
+        logger.info(f"Канал {channel}: получено {len(messages)} сообщений, "
+                f"для обработки отобрано {len(filtered_messages)} (режим force_update={force_update})")
+        
+        # Подготавливаем данные для пакетного сохранения
+        messages_to_save = []
+        for message in filtered_messages:
             # Пропускаем сообщения без текста
             if not message.message:
                 continue
             
-            # Сохраняем сообщение в БД
-            try:
-                # Проверяем, существует ли уже такое сообщение в базе
-                existing_message = self.db_manager.get_message_by_channel_and_id(channel, message.id)
-                
-                if existing_message:
-                    duplicates_count += 1
-                    continue
-                
-                # Убедимся, что мы всегда сохраняем naive datetime
-                message_date = message.date
-                if message_date.tzinfo is not None:
-                    message_date = message_date.replace(tzinfo=None)
-                    
-                self.db_manager.save_message(
-                    channel=channel,
-                    message_id=message.id,
-                    text=message.message,
-                    date=message_date
-                )
-                new_messages_count += 1
-            except Exception as e:
-                logger.error(f"Ошибка при сохранении сообщения из канала {channel}: {str(e)}")
-        
-        logger.info(f"Канал {channel}: сохранено {new_messages_count} новых сообщений, "
-                f"пропущено {duplicates_count} дубликатов")
-        
-        return new_messages_count
-    
-    async def _process_channel(self, channel, start_date=None, end_date=None, days_back=1):
-        """
-        Обработка канала: получение и сохранение сообщений
-        
-        Args:
-            channel (str): Имя канала
-            start_date (datetime, optional): Начальная дата для сбора
-            end_date (datetime, optional): Конечная дата для сбора
-            days_back (int): За сколько дней назад собирать сообщения (используется, если start_date и end_date не указаны)
-        """
-        # Получаем сообщения с учетом указанных дат
-        if start_date is None or end_date is None:
-            messages = await self._get_channel_messages(channel, days_back=days_back)
-        else:
-            # Используем указанный диапазон дат
-            messages = await self._get_channel_messages(channel, days_back=days_back, start_date=start_date, end_date=end_date)
-        
-        
-        
-        new_messages_count = 0
-        duplicates_count = 0
-        
-        for message in messages:
-            # Пропускаем сообщения без текста
-            if not message.message:
-                continue
+            # Нормализуем дату
+            message_date = message.date
+            if message_date.tzinfo is not None:
+                message_date = message_date.replace(tzinfo=None)
             
-            # Сохраняем сообщение в БД
-            try:
-                # Проверяем, существует ли уже такое сообщение в базе
-                existing_message = self.db_manager.get_message_by_channel_and_id(channel, message.id)
-                
-                if existing_message:
-                    duplicates_count += 1
-                    continue
-                
-                # Убедимся, что мы всегда сохраняем naive datetime
-                message_date = message.date
-                if message_date.tzinfo is not None:
-                    message_date = message_date.replace(tzinfo=None)
-                    
-                self.db_manager.save_message(
-                    channel=channel,
-                    message_id=message.id,
-                    text=message.message,
-                    date=message_date
-                )
-                new_messages_count += 1
-            except Exception as e:
-                logger.error(f"Ошибка при сохранении сообщения из канала {channel}: {str(e)}")
+            messages_to_save.append({
+                'channel': channel,
+                'message_id': message.id,
+                'text': message.message,
+                'date': message_date
+            })
+        
+        # Сохраняем сообщения - либо пакетно, либо по одному
+        new_messages_count = 0
+        
+        # Проверяем, реализован ли метод batch_save_messages
+        if hasattr(self.db_manager, 'batch_save_messages') and callable(getattr(self.db_manager, 'batch_save_messages')):
+            # Используем пакетное сохранение
+            if messages_to_save:
+                try:
+                    new_messages_count = self.db_manager.batch_save_messages(messages_to_save)
+                except Exception as e:
+                    logger.error(f"Ошибка при пакетном сохранении сообщений из канала {channel}: {str(e)}")
+                    # Если пакетное сохранение не удалось, пробуем по одному
+                    new_messages_count = self._save_messages_one_by_one(messages_to_save, channel)
+        else:
+            # Если метода batch_save_messages нет, сохраняем по одному
+            new_messages_count = self._save_messages_one_by_one(messages_to_save, channel)
         
         logger.info(f"Канал {channel}: сохранено {new_messages_count} новых сообщений, "
-                f"пропущено {duplicates_count} дубликатов")
+                f"пропущено {len(existing_ids)} существующих")
         
         return new_messages_count
+
+    def _save_messages_one_by_one(self, messages_to_save, channel):
+        """Вспомогательный метод для сохранения сообщений по одному"""
+        saved_count = 0
+        for msg_data in messages_to_save:
+            try:
+                self.db_manager.save_message(
+                    channel=msg_data['channel'],
+                    message_id=msg_data['message_id'],
+                    text=msg_data['text'],
+                    date=msg_data['date']
+                )
+                saved_count += 1
+            except Exception as e:
+                logger.error(f"Ошибка при сохранении сообщения {msg_data['message_id']} из канала {channel}: {str(e)}")
+        
+        return saved_count
     
     """
     Оптимизированный метод для параллельного сбора данных из каналов
     """
-    async def _collect_all_channels_parallel(self, days_back=1, channels=None, specific_date=None):
+    async def _collect_all_channels_parallel(self, days_back=1, channels=None, specific_date=None, start_date=None, end_date=None, force_update=False):
         """
         Параллельный сбор данных со всех или указанных каналов
         
         Args:
             days_back (int): За сколько дней назад собирать сообщения
-            channels (list, optional): Список каналов для сбора данных, если None - используем все доступные
-            specific_date (datetime, optional): Конкретная дата для сбора данных вместо расчета от текущей даты
-                
-        Returns:
-            dict: Словарь с результатами {канал: количество новых сообщений}
+            channels (list, optional): Список каналов для сбора данных
+            specific_date (datetime, optional): Конкретная дата для сбора данных 
+            start_date (datetime, optional): Начальная дата для сбора данных
+            end_date (datetime, optional): Конечная дата для сбора данных
         """
         await self._init_client()
         results = {}
@@ -262,15 +248,20 @@ class DataCollectorAgent:
         # Используем переданные каналы или берем из настроек
         channels_to_process = channels or TELEGRAM_CHANNELS
         
-        # Определяем даты для сбора
-        if specific_date:
-            # Если указана конкретная дата, используем ее и следующую дату как конец периода
-            end_date = specific_date.replace(hour=23, minute=59, second=59)
-            start_date = specific_date.replace(hour=0, minute=0, second=0)
+        # Определяем даты для сбора с приоритетом на явно заданные даты
+        if start_date and end_date:
+            # Если обе даты указаны явно, используем их
+            logger.info(f"Использую явно указанный период: {start_date.strftime('%Y-%m-%d')} - {end_date.strftime('%Y-%m-%d')}")
+        elif specific_date:
+            # Если указана конкретная дата, используем ее как диапазон целого дня
+            start_date = datetime.combine(specific_date.date(), time(0, 0, 0))
+            end_date = datetime.combine(specific_date.date(), time(23, 59, 59))
+            logger.info(f"Использую конкретную дату: {specific_date.strftime('%Y-%m-%d')}")
         else:
             # Иначе рассчитываем от текущей даты
             end_date = datetime.now()
             start_date = end_date - timedelta(days=days_back)
+            logger.info(f"Рассчитываю период от текущей даты: последние {days_back} дней")
         
         # Создаем задачи для всех каналов
         tasks = []
@@ -295,7 +286,7 @@ class DataCollectorAgent:
 
     # Изменения в agents/data_collector.py 
 
-    async def collect_data(self, days_back=1):
+    async def collect_data(self, days_back=1,force_update=False):
         """
         Асинхронный метод для сбора данных из каналов
         
@@ -308,7 +299,7 @@ class DataCollectorAgent:
         logger.info(f"Запуск асинхронного сбора данных за последние {days_back} дней: {', '.join(TELEGRAM_CHANNELS)}")
         
         # Прямой вызов асинхронного метода
-        results = await self._collect_all_channels_parallel(days_back=days_back)
+        results = await self._collect_all_channels_parallel(days_back=days_back,force_update=force_update)
         
         total_messages = sum(results.values())
         logger.info(f"Сбор данных завершен. Всего собрано {total_messages} новых сообщений")
@@ -404,7 +395,7 @@ class DataCollectorAgent:
 
     async def _get_channel_messages(self, channel, days_back=1, limit_per_request=100, start_date=None, end_date=None):
         """
-        Получение сообщений из канала за указанный период
+        Получение сообщений из канала за указанный период   
         
         Args:
             channel (str): Имя канала

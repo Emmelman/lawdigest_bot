@@ -10,7 +10,7 @@ from config.settings import CATEGORIES, BOT_USERNAME
 from database.db_manager import DatabaseManager
 from llm.gemma_model import GemmaLLM
 from langchain.tools import Tool
-
+from datetime import datetime, time, timedelta
 logger = logging.getLogger(__name__)
 
 class DigesterAgent:
@@ -582,55 +582,44 @@ class DigesterAgent:
         Returns:
             dict: Результаты создания дайджеста
         """
-       # Определяем даты
-        end_date = date or datetime.now()
-        start_date = end_date - timedelta(days=days_back-1)
+        logger.info(f"Запрос на создание дайджеста: date={date}, days_back={days_back}, тип={digest_type}")
+    
+        # Определяем конечную дату
+        if date:
+            # Если задана конкретная дата, используем конец этого дня
+            end_date = datetime.combine(date.date() if isinstance(date, datetime) else date, 
+                                    time(23, 59, 59))
+            
+            # Начальная дата - это начало указанной даты минус (days_back-1) дней
+            if days_back == 1:
+                # Если запрошен 1 день, используем только указанную дату
+                start_date = datetime.combine(end_date.date(), time(0, 0, 0))
+                logger.info(f"Используем конкретную дату: с {start_date.strftime('%Y-%m-%d %H:%M')} "
+                        f"по {end_date.strftime('%Y-%m-%d %H:%M')}")
+            else:
+                # Если запрошено больше дней, отсчитываем назад
+                start_date = (end_date - timedelta(days=days_back-1)).replace(hour=0, minute=0, second=0)
+                logger.info(f"Используем период из {days_back} дней: с {start_date.strftime('%Y-%m-%d %H:%M')} "
+                        f"по {end_date.strftime('%Y-%m-%d %H:%M')}")
+        else:
+            # Если дата не задана, используем текущую дату и время
+            end_date = datetime.now()
+            
+            if days_back == 1:
+                # Для одного дня - только текущие сутки
+                start_date = datetime.combine(end_date.date(), time(0, 0, 0))
+                logger.info(f"Используем текущий день: с {start_date.strftime('%Y-%m-%d %H:%M')} "
+                        f"по {end_date.strftime('%Y-%m-%d %H:%M')}")
+            else:
+                # Для нескольких дней - соответствующий период
+                start_date = (end_date - timedelta(days=days_back-1)).replace(hour=0, minute=0, second=0)
+                logger.info(f"Используем период из {days_back} дней до текущего момента: "
+                        f"с {start_date.strftime('%Y-%m-%d %H:%M')} по {end_date.strftime('%Y-%m-%d %H:%M')}")
         
         logger.info(f"Создание дайджеста за период с {start_date.strftime('%Y-%m-%d')} по {end_date.strftime('%Y-%m-%d')}, тип: {digest_type}")
-         # Здесь вставляется предложенный код для проверки существующих дайджестов
-        # При сохранении проверяем, есть ли уже дайджест за этот период
-        brief_digest_id = digest_id if digest_type == "brief" else None
-        detailed_digest_id = digest_id if digest_type == "detailed" else None
         
-        if update_existing and not digest_id:
-            # Ищем существующий дайджест для этого периода и типа
-            if digest_type in ["brief", "both"]:
-                existing_digests = self.db_manager.find_digests_by_parameters(
-                    digest_type="brief",
-                    date_range_start=start_date,
-                    date_range_end=end_date,
-                    focus_category=focus_category,
-                    limit=1
-                )
-                
-                if existing_digests:
-                    # Используем ID существующего дайджеста
-                    brief_digest_id = existing_digests[0]['id']
-                    logger.info(f"Найден существующий краткий дайджест (ID: {brief_digest_id}), он будет обновлен")
-            
-            if digest_type in ["detailed", "both"]:
-                existing_detailed = self.db_manager.find_digests_by_parameters(
-                    digest_type="detailed",
-                    date_range_start=start_date,
-                    date_range_end=end_date,
-                    focus_category=focus_category,
-                    limit=1
-                )
-                
-                if existing_detailed:
-                    # Используем ID существующего подробного дайджеста
-                    detailed_digest_id = existing_detailed[0]['id']
-                    logger.info(f"Найден существующий подробный дайджест (ID: {detailed_digest_id}), он будет обновлен")
         
-        # Получаем сообщения с применением расширенных фильтров
-        filter_result = self.db_manager.get_filtered_messages(
-            start_date=start_date,
-            end_date=end_date,
-            category=focus_category,
-            channels=channels,
-            keywords=keywords
-        )
-        # Получаем сообщения с применением расширенных фильтров
+        # БЛОК 3: ПОЛУЧЕНИЕ СООБЩЕНИЙ - УСТРАНЕНА ДУБЛИКАЦИЯ ВЫЗОВА
         filter_result = self.db_manager.get_filtered_messages(
             start_date=start_date,
             end_date=end_date,
@@ -664,7 +653,8 @@ class DigesterAgent:
                     "message": "Нет сообщений, соответствующих критериям фильтрации"
                 }
         
-        # Группируем сообщения по категориям
+        # Оставшаяся часть метода без изменений...
+        # Группировка по категориям
         messages_by_category = {}
         categories_count = {category: 0 for category in CATEGORIES}
         categories_count["другое"] = 0
@@ -686,6 +676,7 @@ class DigesterAgent:
                 categories_count["другое"] += 1
             
             total_messages += 1
+        
         
         # Если после фильтрации не осталось сообщений
         if total_messages == 0:
@@ -721,7 +712,7 @@ class DigesterAgent:
             detailed_sections = self._process_categories_parallel(
                 categories_to_process, messages_by_category, "detailed"
             )
-        
+
         results = {
             "status": "success",
             "date": end_date.strftime("%Y-%m-%d"),

@@ -118,25 +118,31 @@ class DatabaseManager:
             return False
         finally:
             session.close()
-    def get_messages_with_low_confidence(self, confidence_threshold=3, limit=50):
+    def get_messages_with_low_confidence(self, confidence_threshold=3, limit=50, start_date=None, end_date=None):
         """
-        Получение сообщений с уровнем уверенности ниже указанного порога
-        
-        Args:
-            confidence_threshold (int): Пороговое значение уверенности (сообщения с уверенностью <= этого значения)
-            limit (int): Максимальное количество сообщений
-            
-        Returns:
-            list: Список объектов Message
+        Получение сообщений с низкой уверенностью с фильтрацией по дате
         """
         session = self.Session()
         try:
-            messages = session.query(Message)\
+            query = session.query(Message)\
                 .filter(Message.category != None)\
-                .filter(Message.confidence <= confidence_threshold)\
-                .order_by(Message.confidence, Message.id.desc())\
+                .filter(Message.confidence <= confidence_threshold)
+            
+            # Добавляем фильтр по дате, если даты указаны
+            if start_date:
+                query = query.filter(Message.date >= start_date)
+            if end_date:
+                query = query.filter(Message.date <= end_date)
+            
+            # Сортировка и лимит
+            messages = query.order_by(Message.confidence, Message.id.desc())\
                 .limit(limit)\
                 .all()
+                
+            logger.info(f"Получено {len(messages)} сообщений с низкой уверенностью" + 
+                    (f" за период {start_date.strftime('%Y-%m-%d')} - {end_date.strftime('%Y-%m-%d')}" 
+                        if start_date and end_date else ""))
+            
             return messages
         except Exception as e:
             logger.error(f"Ошибка при получении сообщений с низкой уверенностью: {str(e)}")
@@ -144,31 +150,62 @@ class DatabaseManager:
         finally:
             session.close()
 
-    def get_messages_by_date_range(self, start_date, end_date, category=None):
+    def get_messages_by_date_range(self, start_date, end_date, category=None,
+                            channels=None, keywords=None):
         """
         Получение сообщений за указанный период с фильтрацией по категории
         
         Args:
-            start_date (datetime): Начальная дата
-            end_date (datetime): Конечная дата
+            start_date (datetime): Начальная дата (включительно)
+            end_date (datetime): Конечная дата (включительно)
             category (str, optional): Категория для фильтрации
-            
-        Returns:
-            list: Список объектов Message
+            channels (list, optional): Список каналов для фильтрации
+            keywords (list, optional): Ключевые слова для фильтрации
         """
         session = self.Session()
         try:
+            # Приводим даты к нормализованному виду, если они не datetime
+            if isinstance(start_date, str):
+                start_date = datetime.strptime(start_date, "%Y-%m-%d")
+            if isinstance(end_date, str):
+                # Если передана строковая дата, берем конец дня
+                end_date = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+                
+            # Логируем диапазон дат для отладки
+            logger.info(f"Поиск сообщений с {start_date.strftime('%Y-%m-%d %H:%M:%S')} по "
+                    f"{end_date.strftime('%Y-%m-%d %H:%M:%S')}")
+
+            # Строим базовый запрос с фильтром по дате
             query = session.query(Message).filter(
                 Message.date >= start_date,
-                Message.date <= end_date
+                Message.date <= end_date  # Включаем конечную дату
             )
             
+            # Применяем дополнительные фильтры, если они заданы
             if category:
                 query = query.filter(Message.category == category)
             
-            return query.all()
+            if channels:
+                query = query.filter(Message.channel.in_(channels))
+            
+            if keywords:
+                # Импортируем or_ для корректной работы условий
+                from sqlalchemy import or_
+                
+                # Фильтрация по ключевым словам в тексте
+                keyword_conditions = []
+                for keyword in keywords:
+                    keyword_conditions.append(Message.text.ilike(f'%{keyword}%'))
+                if keyword_conditions:
+                    query = query.filter(or_(*keyword_conditions))
+            
+            # Сортируем по дате (сначала новые)
+            messages = query.order_by(Message.date.desc()).all()
+            
+            logger.info(f"Найдено {len(messages)} сообщений за указанный период")
+            return messages
         except Exception as e:
-            logger.error(f"Ошибка при получении сообщений по дате: {str(e)}")
+            logger.error(f"Ошибка при получении сообщений по дате: {str(e)}", exc_info=True)
             return []
         finally:
             session.close()
@@ -347,7 +384,37 @@ class DatabaseManager:
             return []
         finally:
             session.close()
-
+    def batch_save_messages(self, messages_data):
+        """Пакетное сохранение сообщений"""
+        session = self.Session()
+        try:
+            saved_count = 0
+            for data in messages_data:
+                # Проверяем существование сообщения более эффективно
+                existing = session.query(Message).filter_by(
+                    channel=data['channel'], 
+                    message_id=data['message_id']
+                ).first()
+                
+                if not existing:
+                    message = Message(
+                        channel=data['channel'],
+                        message_id=data['message_id'],
+                        text=data['text'],
+                        date=data['date']
+                    )
+                    session.add(message)
+                    saved_count += 1
+            
+            session.commit()
+            return saved_count
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Ошибка при пакетном сохранении сообщений: {str(e)}")
+            return 0
+        finally:
+            session.close()
+            
     def batch_update_message_categories(self, updates):
         """
         Пакетное обновление категорий сообщений

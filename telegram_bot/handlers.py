@@ -128,51 +128,66 @@ async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_ma
     date_str = context.args[0]
     try:
         # Парсим дату из строки
-        date_parts = date_str.split(".")
-        if len(date_parts) != 3:
-            raise ValueError("Неверный формат даты")
-        
-        day, month, year = map(int, date_parts)
-        target_date = datetime(year, month, day)
-        
-        # Проверяем, есть ли сообщения за указанную дату
+        if "-" in date_str:
+            # Диапазон дат: ДД.ММ.ГГГГ-ДД.ММ.ГГГГ
+            start_str, end_str = date_str.split("-")
+            start_date = datetime.strptime(start_str.strip(), "%d.%m.%Y")
+            end_date = datetime.strptime(end_str.strip(), "%d.%m.%Y").replace(hour=23, minute=59, second=59)
+            days_back = (end_date.date() - start_date.date()).days + 1
+            logger.info(f"Запрос дайджеста за период: {start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')} ({days_back} дней)")
+        else:
+            # Одна дата: ДД.ММ.ГГГГ
+            target_date = datetime.strptime(date_str, "%d.%m.%Y")
+            start_date = target_date
+            end_date = target_date.replace(hour=23, minute=59, second=59)
+            days_back = 1
+            logger.info(f"Запрос дайджеста за дату: {target_date.strftime('%d.%m.%Y')}")
+
+        # Отправляем сообщение о начале сбора данных
+        status_message = await update.message.reply_text(
+            f"Поиск информации за {date_str}... ⏳"
+        )
+            
+        # Сначала проверяем, есть ли сообщения за указанную дату
         messages = db_manager.get_messages_by_date_range(
-            start_date=target_date, 
-            end_date=target_date + timedelta(days=1)
+            start_date=start_date,
+            end_date=end_date
         )
         
         if not messages:
-            # Отправляем сообщение о начале сбора данных
-            status_message = await update.message.reply_text(
+            # Нет сообщений - запускаем сбор данных
+            await status_message.edit_text(
                 f"За {date_str} не найдено сообщений. Начинаю сбор данных... ⏳"
             )
             
+            # Рассчитываем количество дней для сбора данных (от даты до сегодня)
+            today = datetime.now()
+            collect_days = (today - start_date).days + 1
+            collect_days = min(collect_days, 30)  # Ограничиваем 30 днями для безопасности
+            
             # Запускаем сбор данных
             collector = DataCollectorAgent(db_manager)
-            collect_days = (datetime.now() - target_date).days + 1
-            
             await status_message.edit_text(
                 f"{status_message.text}\nСобираю данные за последние {collect_days} дней..."
             )
             
-            # Асинхронно собираем данные
-            collect_result = await collector._collect_all_channels_parallel(days_back=collect_days)
-            total_messages = sum(collect_result.values())
+            # Асинхронно собираем данные с приоритетом на указанный период
+            # Передаем явно start_date и end_date вместо days_back
+            collect_result = await collector._collect_all_channels_parallel(
+                specific_date=start_date if days_back == 1 else None,
+                start_date=start_date,
+                end_date=end_date
+            )
             
+            total_messages = sum(collect_result.values())
             await status_message.edit_text(
                 f"{status_message.text}\n✅ Собрано {total_messages} сообщений."
             )
             
-            if total_messages == 0:
-                await status_message.edit_text(
-                    f"{status_message.text}\n❌ К сожалению, не удалось найти сообщения за {date_str}."
-                )
-                return
-            
-            # Проверяем, появились ли сообщения за указанную дату
+            # Проверяем, появились ли сообщения после сбора
             messages = db_manager.get_messages_by_date_range(
-                start_date=target_date, 
-                end_date=target_date + timedelta(days=1)
+                start_date=start_date, 
+                end_date=end_date
             )
             
             if not messages:
@@ -180,14 +195,29 @@ async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_ma
                     f"{status_message.text}\n❌ К сожалению, не удалось найти сообщения за {date_str}."
                 )
                 return
-                
+            
             await status_message.edit_text(
                 f"{status_message.text}\n✅ Найдено {len(messages)} сообщений за {date_str}."
                 f"\nНачинаю анализ и формирование дайджеста..."
             )
         
-        # Получаем дайджест по дате (с автоматическим созданием при необходимости)
-        digest = db_manager.get_digest_by_date_with_sections(target_date, generate_if_missing=True)
+        # Создаем дайджест с явным указанием даты и периода
+        from agents.digester import DigesterAgent
+        digester = DigesterAgent(db_manager)
+        digest_result = digester.create_digest(
+            date=end_date,  # Используем конечную дату как дату дайджеста
+            days_back=days_back,
+            digest_type="brief"
+        )
+        
+        if not digest_result or "brief_digest_id" not in digest_result:
+            await status_message.edit_text(
+                f"{status_message.text}\n❌ К сожалению, не удалось сформировать дайджест за {date_str}."
+            )
+            return
+        
+        # Получаем созданный дайджест
+        digest = db_manager.get_digest_by_id_with_sections(digest_result["brief_digest_id"])
         
         if not digest:
             await update.message.reply_text(
@@ -195,7 +225,10 @@ async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_ma
             )
             return
         
-        # Отправляем дайджест по частям
+        # Отправляем дайджест
+        await status_message.delete()  # Удаляем сообщение о статусе
+        
+        # Очищаем текст и отправляем дайджест по частям
         safe_text = utils.clean_markdown_text(digest["text"])
         chunks = utils.split_text(safe_text)
         
@@ -203,20 +236,15 @@ async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_ma
             if i == 0:
                 text_html = utils.convert_to_html(chunk)
                 await update.message.reply_text(
-                    f"Дайджест за {digest['date'].strftime('%d.%m.%Y')}:\n\n{text_html}",
+                    f"Дайджест за {date_str}:\n\n{text_html}",
                     parse_mode='HTML'
                 )
             else:
                 await update.message.reply_text(chunk, parse_mode='HTML')
-                
-    except ValueError as e:
+            
+    except ValueError:
         await update.message.reply_text(
-            f"Ошибка в формате даты. Пожалуйста, используйте формат ДД.ММ.ГГГГ, например: 01.04.2025"
-        )
-    except Exception as e:
-        logger.error(f"Ошибка при обработке команды /date: {str(e)}", exc_info=True)
-        await update.message.reply_text(
-            "Произошла ошибка при обработке вашего запроса. Пожалуйста, попробуйте позже."
+            "Ошибка в формате даты. Пожалуйста, используйте формат ДД.ММ.ГГГГ или ДД.ММ.ГГГГ-ДД.ММ.ГГГГ."
         )
 
 async def category_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_manager):
@@ -692,7 +720,7 @@ async def show_digest_by_id(message, digest_id, db_manager):
             await message.reply_text(chunk, parse_mode='HTML')
 
 async def handle_digest_generation(update, context, db_manager, start_date, end_date, 
-                          description, focus_category=None, channels=None, keywords=None):
+                          description, focus_category=None, channels=None, keywords=None, force_update=False):
     """Асинхронный запуск генерации дайджеста с использованием оптимизаций workflow"""
     
     # Определяем, откуда пришел запрос (от сообщения или колбэка)
@@ -758,7 +786,7 @@ async def handle_digest_generation(update, context, db_manager, start_date, end_
         collector = DataCollectorAgent(db_manager)
         
         # Используем асинхронный метод collect_data вместо _collect_all_channels_parallel
-        collect_result = await collector.collect_data(days_back=days_back)
+        collect_result = await collector.collect_data(days_back=days_back,force_update=force_update)
         
         total_messages = collect_result.get("total_new_messages", 0)
         
