@@ -724,9 +724,27 @@ async def handle_digest_generation(update, context, db_manager, start_date, end_
     """Асинхронный запуск генерации дайджеста с использованием оптимизаций workflow"""
     
     # Определяем, откуда пришел запрос (от сообщения или колбэка)
-    message = update.message if hasattr(update, 'message') else update.message
-    user_id = update.effective_user.id
-    
+   # message = update.message if hasattr(update, 'message') else update.message
+    #user_id = update.effective_user.id
+    # Определяем, откуда пришел запрос (от сообщения или колбэка)
+    message = update.message
+    #if hasattr(update, 'callback_query'):
+        # Это объект Update с callback_query
+     #   message = update.callback_query.message
+      #  user_id = update.callback_query.from_user.id
+    if hasattr(update, 'message'):
+        # Это объект Update с message
+        message = update.message
+        user_id = update.effective_user.id
+    elif hasattr(update, 'message') and update.message:
+        # Это объект CallbackQuery с message
+        message = update.message
+        user_id = update.from_user.id
+    else:
+        # Fallback для любых других случаев
+        message = update.effective_message
+        user_id = update.from_user.id if hasattr(update, 'from_user') else None
+
     # Обработка дат и проверка предыдущей генерации (оставляем как есть)
     if not start_date:
         last_generation = db_manager.get_last_digest_generation(source="bot", user_id=user_id)
