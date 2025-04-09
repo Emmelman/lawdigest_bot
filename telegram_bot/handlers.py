@@ -119,15 +119,28 @@ async def digest_detailed_command(update: Update, context: ContextTypes.DEFAULT_
 
 # В файле telegram_bot/handlers.py модифицировать функцию date_command:
 
+# В файле telegram_bot/handlers.py
 async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_manager):
     """Обработчик команды /date - получение дайджеста за определенную дату"""
-    if not context.args or len(context.args) != 1:
+    if not context.args:
         await update.message.reply_text(
-            "Пожалуйста, укажите дату в формате ДД.ММ.ГГГГ, например: /date 01.04.2025"
+            "Пожалуйста, укажите дату в формате ДД.ММ.ГГГГ, например: /date 01.04.2025\n"
+            "Или укажите дату и тип дайджеста: /date 01.04.2025 detailed для подробного дайджеста"
         )
         return
     
+    # Определяем тип дайджеста и дату
+    digest_type = "brief"  # По умолчанию краткий дайджест
     date_str = context.args[0]
+    
+    # Проверяем указан ли тип дайджеста
+    if len(context.args) > 1:
+        type_arg = context.args[1].lower()
+        if type_arg in ["detailed", "full", "подробный", "полный"]:
+            digest_type = "detailed"
+        elif type_arg in ["both", "оба"]:
+            digest_type = "both"
+    
     try:
         # Парсим дату из строки
         if "-" in date_str:
@@ -147,13 +160,14 @@ async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_ma
 
         # Отправляем сообщение о начале сбора данных
         status_message = await update.message.reply_text(
-            f"Поиск информации за {date_str}... ⏳"
+            f"Поиск информации за {date_str} ({digest_type})... ⏳"
         )
         
         # ОПТИМИЗАЦИЯ: Сначала проверяем, есть ли существующий дайджест за указанную дату
         existing_digests = db_manager.find_digests_by_parameters(
             date_range_start=start_date,
             date_range_end=end_date,
+            digest_type=digest_type,
             limit=1
         )
         
@@ -163,7 +177,7 @@ async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_ma
             
             if digest:
                 await status_message.edit_text(
-                    f"Найден существующий дайджест за {date_str}. Отправляю..."
+                    f"Найден существующий дайджест за {date_str} ({digest_type}). Отправляю..."
                 )
                 
                 # Отправляем найденный дайджест
@@ -174,7 +188,7 @@ async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_ma
                     if i == 0:
                         text_html = utils.convert_to_html(chunk)
                         await update.message.reply_text(
-                            f"Дайджест за {date_str}:\n\n{text_html}",
+                            f"Дайджест за {date_str} ({digest_type}):\n\n{text_html}",
                             parse_mode='HTML'
                         )
                     else:
@@ -226,20 +240,19 @@ async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_ma
             
         # Если нужно собрать больше данных
         if not messages:
-            # Рассчитываем количество дней для сбора данных (от даты до сегодня)
-            today = datetime.now()
-            collect_days = (today - start_date).days + 1
-            collect_days = min(collect_days, 30)  # Ограничиваем 30 днями для безопасности
-            
-            # Запускаем сбор данных
+            # Запускаем сбор данных с явным указанием дат, а не дней назад
             collector = DataCollectorAgent(db_manager)
             await status_message.edit_text(
-                f"{status_message.text}\nСобираю данные за последние {collect_days} дней..."
+                f"{status_message.text}\nСобираю данные за указанный период..."
             )
             
-            # Асинхронно собираем данные с приоритетом на указанный период
-            # Передаем явно start_date и end_date
-            collect_result = await collector.collect_data(days_back=collect_days, force_update=False)
+            # Асинхронно собираем данные с явным указанием периода
+            collect_result = await collector.collect_data(
+                days_back=days_back, 
+                force_update=False,
+                start_date=start_date,
+                end_date=end_date
+            )
             
             total_messages = collect_result.get("total_new_messages", 0)
             await status_message.edit_text(
@@ -313,27 +326,37 @@ async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_ma
         
         digester = DigesterAgent(db_manager, GemmaLLM())
         await status_message.edit_text(
-            f"{status_message.text}\nФормирую дайджест..."
+            f"{status_message.text}\nФормирую дайджест типа {digest_type}..."
         )
         
         digest_result = digester.create_digest(
             date=end_date,  # Используем конечную дату как дату дайджеста
             days_back=days_back,
-            digest_type="brief"
+            digest_type=digest_type
         )
         
-        if not digest_result or "brief_digest_id" not in digest_result:
+        # Получаем ID созданного дайджеста в зависимости от типа
+        digest_id = None
+        if digest_type == "brief" and "brief_digest_id" in digest_result:
+            digest_id = digest_result["brief_digest_id"]
+        elif digest_type == "detailed" and "detailed_digest_id" in digest_result:
+            digest_id = digest_result["detailed_digest_id"]
+        elif digest_type == "both":
+            # Для both используем краткий дайджест по умолчанию
+            digest_id = digest_result.get("brief_digest_id", digest_result.get("detailed_digest_id"))
+        
+        if not digest_id:
             await status_message.edit_text(
-                f"{status_message.text}\n❌ К сожалению, не удалось сформировать дайджест."
+                f"{status_message.text}\n❌ К сожалению, не удалось сформировать дайджест типа {digest_type}."
             )
             return
         
         # Получаем созданный дайджест
-        digest = db_manager.get_digest_by_id_with_sections(digest_result["brief_digest_id"])
+        digest = db_manager.get_digest_by_id_with_sections(digest_id)
         
         if not digest:
             await update.message.reply_text(
-                f"К сожалению, не удалось сформировать дайджест."
+                f"К сожалению, не удалось получить сформированный дайджест."
             )
             return
         
@@ -347,13 +370,13 @@ async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_ma
         chunks = utils.split_text(safe_text)
         
         # Формируем заголовок в зависимости от того, изменился ли период
-        if start_date == target_date and end_date.date() == target_date.date():
-            header = f"Дайджест за {date_str}"
+        if start_date.date() == target_date.date() and end_date.date() == target_date.date():
+            header = f"Дайджест за {date_str} ({digest_type})"
         else:
             period_desc = f"{start_date.strftime('%d.%m.%Y')}"
             if start_date.date() != end_date.date():
                 period_desc += f" - {end_date.strftime('%d.%m.%Y')}"
-            header = f"Дайджест за период: {period_desc}"
+            header = f"Дайджест за период: {period_desc} ({digest_type})"
         
         for i, chunk in enumerate(chunks):
             if i == 0:

@@ -31,6 +31,7 @@ class DatabaseManager:
             else:
                 db_url += '&timeout=30'
         
+        init_db(db_url) 
         # Создаем движок с улучшенными параметрами для многопоточного доступа
         self.engine = create_engine(
             db_url,
