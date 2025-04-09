@@ -4,6 +4,7 @@
 import logging
 import functools
 import time
+import sqlalchemy
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, scoped_session
 from datetime import datetime, timedelta
@@ -22,10 +23,76 @@ class DatabaseManager:
         Args:
             db_url (str): URL для подключения к БД (например, sqlite:///lawdigest.db)
         """
-        self.engine = init_db(db_url)
+        # Используем SQLite с дополнительными параметрами для избежания блокировок
+        if 'sqlite' in db_url.lower():
+            # Добавляем параметр timeout для ожидания при блокировке
+            if '?' not in db_url:
+                db_url += '?timeout=30'
+            else:
+                db_url += '&timeout=30'
+        
+        # Создаем движок с улучшенными параметрами для многопоточного доступа
+        self.engine = create_engine(
+            db_url,
+            connect_args={
+                'check_same_thread': False,  # Разрешаем доступ из разных потоков
+            },
+            pool_size=10,  # Размер пула соединений
+            max_overflow=20,  # Максимальное количество дополнительных соединений
+            pool_timeout=30,  # Время ожидания соединения из пула
+            pool_recycle=1800,  # Переиспользовать соединения не старше 30 минут
+            pool_pre_ping=True  # Проверять соединение перед использованием
+        )
+        
         self.session_factory = sessionmaker(bind=self.engine)
         self.Session = scoped_session(self.session_factory)
+
+    # Добавляем декоратор для автоматической обработки транзакций и повторных попыток
+    def with_retry(max_attempts=3, delay=0.5):
+        """
+        Декоратор для повторных попыток выполнения операций с базой данных
+        при возникновении конкурентных конфликтов.
+        
+        Args:
+            max_attempts (int): Максимальное количество попыток
+            delay (float): Задержка между попытками в секундах
+        """
+        def decorator(func):
+            @functools.wraps(func)
+            def wrapper(self, *args, **kwargs):
+                attempt = 0
+                last_error = None
+                
+                while attempt < max_attempts:
+                    try:
+                        return func(self, *args, **kwargs)
+                    except Exception as e:
+                        # Определяем, связана ли ошибка с блокировкой БД
+                        is_db_lock_error = (
+                            isinstance(e, sqlalchemy.exc.OperationalError) and
+                            "database is locked" in str(e).lower()
+                        )
+                        
+                        attempt += 1
+                        last_error = e
+                        
+                        # Для ошибок блокировки используем экспоненциальную задержку
+                        if is_db_lock_error and attempt < max_attempts:
+                            retry_delay = delay * (2 ** (attempt - 1))  # Экспоненциальная задержка
+                            logger.warning(f"База данных заблокирована, повторная попытка {attempt}/{max_attempts} через {retry_delay:.2f}с")
+                            time.sleep(retry_delay)
+                        else:
+                            # Если это не ошибка блокировки или последняя попытка - прерываем
+                            break
+                
+                # Если все попытки не удались, логируем и выбрасываем исключение
+                logger.error(f"Не удалось выполнить операцию с БД после {max_attempts} попыток: {str(last_error)}")
+                raise last_error
+            
+            return wrapper
+        return decorator
     
+    @with_retry(max_attempts=3, delay=0.5)
     def save_message(self, channel, message_id, text, date):
         """
         Сохранение сообщения из Telegram-канала
@@ -87,7 +154,8 @@ class DatabaseManager:
             return []
         finally:
             session.close()
-
+    
+    @with_retry(max_attempts=3, delay=0.5)
     def update_message_category(self, message_id, category, confidence=3):
         """
         Обновление категории сообщения с уровнем уверенности
@@ -384,6 +452,8 @@ class DatabaseManager:
             return []
         finally:
             session.close()
+
+    @with_retry(max_attempts=3, delay=0.5)        
     def batch_save_messages(self, messages_data):
         """Пакетное сохранение сообщений"""
         session = self.Session()

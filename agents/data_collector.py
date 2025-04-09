@@ -10,7 +10,7 @@ from langchain.tools import Tool
 from crewai import Agent, Task
 import time
 from config.settings import TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_CHANNELS
-
+from utils.telegram_session_manager import TelegramSessionManager
 
 logger = logging.getLogger(__name__)
 
@@ -49,11 +49,19 @@ class DataCollectorAgent:
         )
     
     async def _init_client(self):
-        """Инициализация клиента Telegram"""
+        """Инициализация клиента Telegram с использованием менеджера сессий"""
         if not self.client:
-            self.client = TelegramClient('session_name', self.api_id, self.api_hash)
-            await self.client.start()
+            # Используем менеджер сессий для получения клиента
+            session_manager = TelegramSessionManager(self.api_id, self.api_hash)
+            self.client = await session_manager.get_client()
+            self.session_manager = session_manager  # Сохраняем ссылку на менеджер
     
+    async def _release_client(self):
+        """Корректное освобождение клиента после использования"""
+        if hasattr(self, 'session_manager') and hasattr(self, 'client') and self.client:
+            await self.session_manager.release_client(self.client)
+            self.client = None
+
     async def _get_channel_messages(self, channel, days_back=1, limit_per_request=100, start_date=None, end_date=None):
         """
         Получение сообщений из канала за указанный период
@@ -146,70 +154,77 @@ class DataCollectorAgent:
             days_back (int): За сколько дней назад собирать сообщения 
             force_update (bool): Принудительно обрабатывать все сообщения
         """
-        # Получаем сообщения с учетом дат
-        if start_date is None or end_date is None:
-            messages = await self._get_channel_messages(channel, days_back=days_back)
-        else:
-            messages = await self._get_channel_messages(
-                channel, days_back=days_back, start_date=start_date, end_date=end_date
-            )
-        
-        # Если нет принудительного обновления, фильтруем существующие сообщения
-        existing_ids = []
-        if not force_update:
-            # Получаем существующие ID - используем имеющийся метод
-            existing_messages = []
-            for msg in messages:
-                existing = self.db_manager.get_message_by_channel_and_id(channel, msg.id)
-                if existing:
-                    existing_ids.append(msg.id)
-        
-        # Фильтруем сообщения - оставляем только новые или все при force_update
-        filtered_messages = [msg for msg in messages if force_update or msg.id not in existing_ids]
-        
-        logger.info(f"Канал {channel}: получено {len(messages)} сообщений, "
-                f"для обработки отобрано {len(filtered_messages)} (режим force_update={force_update})")
-        
-        # Подготавливаем данные для пакетного сохранения
-        messages_to_save = []
-        for message in filtered_messages:
-            # Пропускаем сообщения без текста
-            if not message.message:
-                continue
+        try:
+            # Инициализируем клиент для каждого канала, чтобы избежать конфликтов
+            await self._init_client()
             
-            # Нормализуем дату
-            message_date = message.date
-            if message_date.tzinfo is not None:
-                message_date = message_date.replace(tzinfo=None)
+            # Получаем сообщения с учетом дат
+            if start_date is None or end_date is None:
+                messages = await self._get_channel_messages(channel, days_back=days_back)
+            else:
+                messages = await self._get_channel_messages(
+                    channel, days_back=days_back, start_date=start_date, end_date=end_date
+                )
             
-            messages_to_save.append({
-                'channel': channel,
-                'message_id': message.id,
-                'text': message.message,
-                'date': message_date
-            })
-        
-        # Сохраняем сообщения - либо пакетно, либо по одному
-        new_messages_count = 0
-        
-        # Проверяем, реализован ли метод batch_save_messages
-        if hasattr(self.db_manager, 'batch_save_messages') and callable(getattr(self.db_manager, 'batch_save_messages')):
-            # Используем пакетное сохранение
-            if messages_to_save:
-                try:
-                    new_messages_count = self.db_manager.batch_save_messages(messages_to_save)
-                except Exception as e:
-                    logger.error(f"Ошибка при пакетном сохранении сообщений из канала {channel}: {str(e)}")
-                    # Если пакетное сохранение не удалось, пробуем по одному
-                    new_messages_count = self._save_messages_one_by_one(messages_to_save, channel)
-        else:
-            # Если метода batch_save_messages нет, сохраняем по одному
-            new_messages_count = self._save_messages_one_by_one(messages_to_save, channel)
-        
-        logger.info(f"Канал {channel}: сохранено {new_messages_count} новых сообщений, "
-                f"пропущено {len(existing_ids)} существующих")
-        
-        return new_messages_count
+            # Если нет принудительного обновления, фильтруем существующие сообщения
+            existing_ids = []
+            if not force_update:
+                # Получаем существующие ID - используем имеющийся метод
+                existing_messages = []
+                for msg in messages:
+                    existing = self.db_manager.get_message_by_channel_and_id(channel, msg.id)
+                    if existing:
+                        existing_ids.append(msg.id)
+            
+            # Фильтруем сообщения - оставляем только новые или все при force_update
+            filtered_messages = [msg for msg in messages if force_update or msg.id not in existing_ids]
+            
+            logger.info(f"Канал {channel}: получено {len(messages)} сообщений, "
+                    f"для обработки отобрано {len(filtered_messages)} (режим force_update={force_update})")
+            
+            # Подготавливаем данные для пакетного сохранения
+            messages_to_save = []
+            for message in filtered_messages:
+                # Пропускаем сообщения без текста
+                if not message.message:
+                    continue
+                
+                # Нормализуем дату
+                message_date = message.date
+                if message_date.tzinfo is not None:
+                    message_date = message_date.replace(tzinfo=None)
+                
+                messages_to_save.append({
+                    'channel': channel,
+                    'message_id': message.id,
+                    'text': message.message,
+                    'date': message_date
+                })
+            
+            # Сохраняем сообщения - либо пакетно, либо по одному
+            new_messages_count = 0
+            
+            # Проверяем, реализован ли метод batch_save_messages
+            if hasattr(self.db_manager, 'batch_save_messages') and callable(getattr(self.db_manager, 'batch_save_messages')):
+                # Используем пакетное сохранение
+                if messages_to_save:
+                    try:
+                        new_messages_count = self.db_manager.batch_save_messages(messages_to_save)
+                    except Exception as e:
+                        logger.error(f"Ошибка при пакетном сохранении сообщений из канала {channel}: {str(e)}")
+                        # Если пакетное сохранение не удалось, пробуем по одному
+                        new_messages_count = self._save_messages_one_by_one(messages_to_save, channel)
+            else:
+                # Если метода batch_save_messages нет, сохраняем по одному
+                new_messages_count = self._save_messages_one_by_one(messages_to_save, channel)
+            
+            logger.info(f"Канал {channel}: сохранено {new_messages_count} новых сообщений, "
+                    f"пропущено {len(existing_ids)} существующих")
+                    
+            return new_messages_count
+        finally:
+            # Освобождаем клиент в любом случае
+            await self._release_client()
 
     def _save_messages_one_by_one(self, messages_to_save, channel):
         """Вспомогательный метод для сохранения сообщений по одному"""
@@ -242,7 +257,7 @@ class DataCollectorAgent:
             start_date (datetime, optional): Начальная дата для сбора данных
             end_date (datetime, optional): Конечная дата для сбора данных
         """
-        await self._init_client()
+        # Убираем вызов self._init_client()
         results = {}
         
         # Используем переданные каналы или берем из настроек
@@ -266,7 +281,7 @@ class DataCollectorAgent:
         # Создаем задачи для всех каналов
         tasks = []
         for channel in channels_to_process:
-            task = self._process_channel(channel, start_date=start_date, end_date=end_date)
+            task = self._process_channel(channel, start_date=start_date, end_date=end_date, force_update=force_update)
             tasks.append(task)
         
         # Запускаем все задачи параллельно
@@ -286,44 +301,92 @@ class DataCollectorAgent:
 
     # Изменения в agents/data_collector.py 
 
-    async def collect_data(self, days_back=1,force_update=False):
-        """
-        Асинхронный метод для сбора данных из каналов
-        
-        Args:
-            days_back (int): За сколько дней назад собирать данные
+    # В файле agents/data_collector.py модифицировать метод collect_data:
+
+async def collect_data(self, days_back=1, force_update=False):
+    """
+    Асинхронный метод для сбора данных из каналов
+    
+    Args:
+        days_back (int): За сколько дней назад собирать данные
+        force_update (bool): Принудительно обновлять существующие сообщения
                 
-        Returns:
-            dict: Результаты сбора данных
-        """
-        logger.info(f"Запуск асинхронного сбора данных за последние {days_back} дней: {', '.join(TELEGRAM_CHANNELS)}")
-        
-        # Прямой вызов асинхронного метода
-        results = await self._collect_all_channels_parallel(days_back=days_back,force_update=force_update)
-        
-        total_messages = sum(results.values())
-        logger.info(f"Сбор данных завершен. Всего собрано {total_messages} новых сообщений")
-        
-        if total_messages > 0:
-            # Вызываем хук обновления после сбора
-            update_result = await self.after_collect_hook({
-                "status": "success",
-                "total_new_messages": total_messages,
-                "channels_stats": results
-            })
+    Returns:
+        dict: Результаты сбора данных
+    """
+    logger.info(f"Запуск асинхронного сбора данных за последние {days_back} дней: {', '.join(TELEGRAM_CHANNELS)}")
+    
+    # Добавляем error handling с повторными попытками для сбора данных
+    max_attempts = 3
+    attempt = 0
+    backoff_delay = 2  # начальная задержка в секундах
+    
+    while attempt < max_attempts:
+        try:
+            # Прямой вызов асинхронного метода
+            results = await self._collect_all_channels_parallel(days_back=days_back, force_update=force_update)
+            
+            total_messages = sum(results.values())
+            logger.info(f"Сбор данных завершен. Всего собрано {total_messages} новых сообщений")
+            
+            if total_messages > 0:
+                # Вызываем хук обновления после сбора
+                update_result = await self.after_collect_hook({
+                    "status": "success",
+                    "total_new_messages": total_messages,
+                    "channels_stats": results
+                })
+                
+                return {
+                    "status": "success",
+                    "total_new_messages": total_messages,
+                    "channels_stats": results,
+                    "update_result": update_result
+                }
             
             return {
                 "status": "success",
                 "total_new_messages": total_messages,
-                "channels_stats": results,
-                "update_result": update_result
+                "channels_stats": results
             }
-        
-        return {
-            "status": "success",
-            "total_new_messages": total_messages,
-            "channels_stats": results
-        }
+            
+        except Exception as e:
+            attempt += 1
+            # Проверяем, связана ли ошибка с блокировкой базы данных
+            if "database is locked" in str(e).lower():
+                if attempt < max_attempts:
+                    # Используем экспоненциальную задержку между попытками
+                    delay = backoff_delay * (2 ** (attempt - 1))
+                    logger.warning(f"Ошибка блокировки БД при сборе данных, повторная попытка {attempt}/{max_attempts} через {delay}с: {str(e)}")
+                    await asyncio.sleep(delay)
+                    
+                    # Очищаем состояние клиента перед следующей попыткой
+                    self.client = None
+                else:
+                    logger.error(f"Не удалось собрать данные после {max_attempts} попыток из-за блокировки БД: {str(e)}")
+                    return {
+                        "status": "error",
+                        "error": f"Ошибка блокировки базы данных: {str(e)}",
+                        "total_new_messages": 0,
+                        "channels_stats": {}
+                    }
+            else:
+                # Если ошибка не связана с блокировкой, просто логируем и возвращаем результат
+                logger.error(f"Ошибка при сборе данных: {str(e)}")
+                return {
+                    "status": "error",
+                    "error": str(e),
+                    "total_new_messages": 0,
+                    "channels_stats": {}
+                }
+                
+    # Если все попытки не удались
+    return {
+        "status": "error",
+        "error": "Превышено максимальное количество попыток сбора данных",
+        "total_new_messages": 0,
+        "channels_stats": {}
+    }
 
     async def after_collect_hook(self, collect_result):
         """

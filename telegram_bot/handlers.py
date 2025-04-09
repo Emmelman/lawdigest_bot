@@ -117,6 +117,8 @@ async def digest_detailed_command(update: Update, context: ContextTypes.DEFAULT_
         else:
             await update.message.reply_text(chunk, parse_mode='HTML')
 
+# В файле telegram_bot/handlers.py модифицировать функцию date_command:
+
 async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_manager):
     """Обработчик команды /date - получение дайджеста за определенную дату"""
     if not context.args or len(context.args) != 1:
@@ -147,19 +149,83 @@ async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_ma
         status_message = await update.message.reply_text(
             f"Поиск информации за {date_str}... ⏳"
         )
+        
+        # ОПТИМИЗАЦИЯ: Сначала проверяем, есть ли существующий дайджест за указанную дату
+        existing_digests = db_manager.find_digests_by_parameters(
+            date_range_start=start_date,
+            date_range_end=end_date,
+            limit=1
+        )
+        
+        if existing_digests:
+            digest_id = existing_digests[0]['id']
+            digest = db_manager.get_digest_by_id_with_sections(digest_id)
             
-        # Сначала проверяем, есть ли сообщения за указанную дату
+            if digest:
+                await status_message.edit_text(
+                    f"Найден существующий дайджест за {date_str}. Отправляю..."
+                )
+                
+                # Отправляем найденный дайджест
+                safe_text = utils.clean_markdown_text(digest["text"])
+                chunks = utils.split_text(safe_text)
+                
+                for i, chunk in enumerate(chunks):
+                    if i == 0:
+                        text_html = utils.convert_to_html(chunk)
+                        await update.message.reply_text(
+                            f"Дайджест за {date_str}:\n\n{text_html}",
+                            parse_mode='HTML'
+                        )
+                    else:
+                        await update.message.reply_text(utils.convert_to_html(chunk), parse_mode='HTML')
+                
+                return
+            
+        # Проверяем, есть ли сообщения за указанную дату
         messages = db_manager.get_messages_by_date_range(
             start_date=start_date,
             end_date=end_date
         )
         
         if not messages:
-            # Нет сообщений - запускаем сбор данных
+            # Если нет сообщений за конкретную дату, расширяем поиск на соседние даты
+            expanded_start_date = start_date - timedelta(days=1)
+            expanded_end_date = end_date + timedelta(days=1)
+            
             await status_message.edit_text(
-                f"За {date_str} не найдено сообщений. Начинаю сбор данных... ⏳"
+                f"За {date_str} не найдено сообщений. Проверяю соседние даты..."
             )
             
+            expanded_messages = db_manager.get_messages_by_date_range(
+                start_date=expanded_start_date,
+                end_date=expanded_end_date
+            )
+            
+            if expanded_messages:
+                # Если есть сообщения в расширенном диапазоне, используем их
+                await status_message.edit_text(
+                    f"Найдено {len(expanded_messages)} сообщений в ближайшие даты. "
+                    f"Период расширен до {expanded_start_date.strftime('%d.%m.%Y')} - {expanded_end_date.strftime('%d.%m.%Y')}. "
+                    f"Генерирую дайджест..."
+                )
+                
+                start_date = expanded_start_date
+                end_date = expanded_end_date
+                days_back = (end_date.date() - start_date.date()).days + 1
+                messages = expanded_messages
+            else:
+                # Если и в расширенном диапазоне нет сообщений, запускаем сбор данных
+                await status_message.edit_text(
+                    f"За {date_str} и ближайшие даты не найдено сообщений. Начинаю сбор данных... ⏳"
+                )
+        else:
+            await status_message.edit_text(
+                f"Найдено {len(messages)} сообщений за {date_str}. Генерирую дайджест..."
+            )
+            
+        # Если нужно собрать больше данных
+        if not messages:
             # Рассчитываем количество дней для сбора данных (от даты до сегодня)
             today = datetime.now()
             collect_days = (today - start_date).days + 1
@@ -172,14 +238,10 @@ async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_ma
             )
             
             # Асинхронно собираем данные с приоритетом на указанный период
-            # Передаем явно start_date и end_date вместо days_back
-            collect_result = await collector._collect_all_channels_parallel(
-                specific_date=start_date if days_back == 1 else None,
-                start_date=start_date,
-                end_date=end_date
-            )
+            # Передаем явно start_date и end_date
+            collect_result = await collector.collect_data(days_back=collect_days, force_update=False)
             
-            total_messages = sum(collect_result.values())
+            total_messages = collect_result.get("total_new_messages", 0)
             await status_message.edit_text(
                 f"{status_message.text}\n✅ Собрано {total_messages} сообщений."
             )
@@ -191,19 +253,69 @@ async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_ma
             )
             
             if not messages:
-                await status_message.edit_text(
-                    f"{status_message.text}\n❌ К сожалению, не удалось найти сообщения за {date_str}."
+                # Снова расширяем поиск, если не нашли сообщения 
+                expanded_start_date = start_date - timedelta(days=1)
+                expanded_end_date = end_date + timedelta(days=1)
+                expanded_messages = db_manager.get_messages_by_date_range(
+                    start_date=expanded_start_date,
+                    end_date=expanded_end_date
                 )
-                return
+                
+                if expanded_messages:
+                    await status_message.edit_text(
+                        f"{status_message.text}\n✅ Найдено {len(expanded_messages)} сообщений "
+                        f"в ближайшие даты. Период: {expanded_start_date.strftime('%d.%m.%Y')} - "
+                        f"{expanded_end_date.strftime('%d.%m.%Y')}."
+                    )
+                    start_date = expanded_start_date
+                    end_date = expanded_end_date
+                    days_back = (end_date.date() - start_date.date()).days + 1
+                    messages = expanded_messages
+                else:
+                    await status_message.edit_text(
+                        f"{status_message.text}\n❌ К сожалению, не удалось найти сообщения за указанный период "
+                        f"или ближайшие даты."
+                    )
+                    return
+        
+        # Анализируем сообщения, если они не проанализированы
+        unanalyzed = [msg for msg in messages if msg.category is None]
+        if unanalyzed:
+            await status_message.edit_text(
+                f"{status_message.text}\nАнализирую {len(unanalyzed)} неклассифицированных сообщений..."
+            )
+            
+            from agents.analyzer import AnalyzerAgent
+            from llm.qwen_model import QwenLLM
+            
+            analyzer = AnalyzerAgent(db_manager, QwenLLM())
+            analyze_result = analyzer.analyze_messages_batched(
+                limit=len(unanalyzed),
+                batch_size=5
+            )
             
             await status_message.edit_text(
-                f"{status_message.text}\n✅ Найдено {len(messages)} сообщений за {date_str}."
-                f"\nНачинаю анализ и формирование дайджеста..."
+                f"{status_message.text}\n✅ Проанализировано {analyze_result.get('analyzed_count', 0)} сообщений."
             )
-        
+            
+            # Проверка категоризации для сообщений с низким уровнем уверенности
+            from agents.critic import CriticAgent
+            critic = CriticAgent(db_manager)
+            review_result = critic.review_recent_categorizations(
+                confidence_threshold=2,
+                limit=30,
+                batch_size=5
+            )
+
         # Создаем дайджест с явным указанием даты и периода
         from agents.digester import DigesterAgent
-        digester = DigesterAgent(db_manager)
+        from llm.gemma_model import GemmaLLM
+        
+        digester = DigesterAgent(db_manager, GemmaLLM())
+        await status_message.edit_text(
+            f"{status_message.text}\nФормирую дайджест..."
+        )
+        
         digest_result = digester.create_digest(
             date=end_date,  # Используем конечную дату как дату дайджеста
             days_back=days_back,
@@ -212,7 +324,7 @@ async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_ma
         
         if not digest_result or "brief_digest_id" not in digest_result:
             await status_message.edit_text(
-                f"{status_message.text}\n❌ К сожалению, не удалось сформировать дайджест за {date_str}."
+                f"{status_message.text}\n❌ К сожалению, не удалось сформировать дайджест."
             )
             return
         
@@ -221,30 +333,46 @@ async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_ma
         
         if not digest:
             await update.message.reply_text(
-                f"К сожалению, не удалось сформировать дайджест за {date_str}."
+                f"К сожалению, не удалось сформировать дайджест."
             )
             return
         
         # Отправляем дайджест
-        await status_message.delete()  # Удаляем сообщение о статусе
+        await status_message.edit_text(
+            f"{status_message.text}\n✅ Дайджест успешно сформирован!"
+        )
         
         # Очищаем текст и отправляем дайджест по частям
         safe_text = utils.clean_markdown_text(digest["text"])
         chunks = utils.split_text(safe_text)
         
+        # Формируем заголовок в зависимости от того, изменился ли период
+        if start_date == target_date and end_date.date() == target_date.date():
+            header = f"Дайджест за {date_str}"
+        else:
+            period_desc = f"{start_date.strftime('%d.%m.%Y')}"
+            if start_date.date() != end_date.date():
+                period_desc += f" - {end_date.strftime('%d.%m.%Y')}"
+            header = f"Дайджест за период: {period_desc}"
+        
         for i, chunk in enumerate(chunks):
             if i == 0:
                 text_html = utils.convert_to_html(chunk)
                 await update.message.reply_text(
-                    f"Дайджест за {date_str}:\n\n{text_html}",
+                    f"{header}:\n\n{text_html}",
                     parse_mode='HTML'
                 )
             else:
-                await update.message.reply_text(chunk, parse_mode='HTML')
+                await update.message.reply_text(utils.convert_to_html(chunk), parse_mode='HTML')
             
     except ValueError:
         await update.message.reply_text(
             "Ошибка в формате даты. Пожалуйста, используйте формат ДД.ММ.ГГГГ или ДД.ММ.ГГГГ-ДД.ММ.ГГГГ."
+        )
+    except Exception as e:
+        logger.error(f"Ошибка при обработке команды date: {str(e)}", exc_info=True)
+        await update.message.reply_text(
+            f"Произошла ошибка при обработке запроса: {str(e)}"
         )
 
 async def category_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_manager):
