@@ -6,7 +6,7 @@ from datetime import datetime, time
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-
+import asyncio
 from config.settings import (
     COLLECT_INTERVAL_MINUTES,
     ANALYZE_INTERVAL_MINUTES,
@@ -57,11 +57,13 @@ class JobScheduler:
                 verbose=True
             )
     
-    def collect_data_job(self):
+    async def collect_data_job(self):
         """Задача сбора данных"""
         logger.info("Запуск задачи сбора данных")
         try:
-            result = self.data_collector.collect_data()
+            # Используйте loop.run_until_complete для корутин
+            loop = asyncio.get_event_loop()
+            result = loop.run_until_complete(self.data_collector.collect_data())
             logger.info(f"Задача сбора данных завершена: {result}")
         except Exception as e:
             logger.error(f"Ошибка при выполнении задачи сбора данных: {str(e)}")
@@ -117,6 +119,13 @@ class JobScheduler:
             id='create_digest'
         )
         
+        # Задача обновления дайджестов (после анализа сообщений)
+        self.scheduler.add_job(
+            self.update_digests_job,
+            IntervalTrigger(minutes=ANALYZE_INTERVAL_MINUTES + 5),  # Запускаем чуть позже анализа
+            id='update_digests'
+        )
+        
         logger.info("Задачи настроены")
     
     def start(self):
@@ -129,3 +138,21 @@ class JobScheduler:
         """Остановка планировщика"""
         self.scheduler.shutdown()
         logger.info("Планировщик остановлен")
+    
+    def update_digests_job(self):
+        """Задача обновления дайджестов при получении новых сообщений"""
+        logger.info("Запуск задачи обновления дайджестов")
+        try:
+            # Определяем дату для обновления (обычно сегодня)
+            today = datetime.now()
+            
+            # Создаем агент-дайджестер
+            from agents.digester import DigesterAgent
+            digester = DigesterAgent(self.db_manager)
+            
+            # Обновляем все дайджесты, содержащие сегодняшнюю дату
+            result = digester.update_digests_for_date(today)
+            
+            logger.info(f"Задача обновления дайджестов завершена: {result}")
+        except Exception as e:
+            logger.error(f"Ошибка при выполнении задачи обновления дайджестов: {str(e)}")  

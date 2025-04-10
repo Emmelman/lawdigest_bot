@@ -1,0 +1,24 @@
+lawdigest_bot/
+    config/__init__.py
+    config/settings.py
+    config/logging_config.py
+    database/__init__.py
+    database/models.py
+    database/db_manager.py
+    agents/__init__.py
+    agents/data_collector.py
+    agents/analyzer.py
+    agents/digester.py
+    telegram_bot/__init__.py
+    telegram_bot/bot.py
+    telegram_bot/handlers.py
+    llm/__init__.py
+    llm/qwen_model.py
+    llm/gemma_model.py
+    utils/__init__.py
+    utils/helpers.py
+    scheduler/__init__.py
+    scheduler/jobs.py
+    main.py
+    requirements.txt
+    README.md
