@@ -135,7 +135,7 @@ class DatabaseManager:
             raise
         finally:
             session.close()
-
+    
     def get_unanalyzed_messages(self, limit=100):
         """
         Получение сообщений без категории
@@ -703,9 +703,24 @@ class DatabaseManager:
     def save_digest_with_parameters(self, date, text, sections, digest_type="brief", 
                               date_range_start=None, date_range_end=None, 
                               focus_category=None, channels_filter=None, 
-                              keywords_filter=None, digest_id=None):
+                              keywords_filter=None, digest_id=None,
+                              is_today=False, last_updated=None):
         """
         Сохранение дайджеста с расширенными параметрами
+        
+        Args:
+            date (datetime): Дата дайджеста
+            text (str): Текст дайджеста
+            sections (dict): Словарь секций
+            digest_type (str): Тип дайджеста
+            date_range_start (datetime): Начальная дата диапазона
+            date_range_end (datetime): Конечная дата диапазона
+            focus_category (str): Фокусная категория
+            channels_filter (list): Список каналов для фильтрации
+            keywords_filter (list): Список ключевых слов для фильтрации
+            digest_id (int): ID существующего дайджеста для обновления
+            is_today (bool): Признак дайджеста за текущий день
+            last_updated (datetime): Время последнего обновления
         """
         session = self.Session()
         try:
@@ -713,10 +728,12 @@ class DatabaseManager:
                 # Обновляем существующий дайджест
                 digest = session.query(Digest).filter_by(id=digest_id).first()
                 if digest:
+                    # Обновляем поля дайджеста
                     digest.text = text
                     digest.date = date
-                    digest.last_updated = datetime.now()
-                    # Обновляем параметры, если они предоставлены
+                    digest.last_updated = last_updated or datetime.now()
+                    
+                    # Обновляем дополнительные параметры, если они предоставлены
                     if date_range_start is not None:
                         digest.date_range_start = date_range_start
                     if date_range_end is not None:
@@ -727,6 +744,10 @@ class DatabaseManager:
                         digest.channels_filter = json.dumps(channels_filter) if channels_filter else None
                     if keywords_filter is not None:
                         digest.keywords_filter = json.dumps(keywords_filter) if keywords_filter else None
+                    
+                    # Добавляем признак дайджеста за текущий день
+                    if hasattr(digest, 'is_today'):
+                        digest.is_today = is_today
                     
                     # Удаляем существующие секции
                     session.query(DigestSection).filter_by(digest_id=digest_id).delete()
@@ -741,7 +762,8 @@ class DatabaseManager:
                         focus_category=focus_category,
                         channels_filter=json.dumps(channels_filter) if channels_filter else None,
                         keywords_filter=json.dumps(keywords_filter) if keywords_filter else None,
-                        last_updated=datetime.now()
+                        last_updated=last_updated or datetime.now(),
+                        is_today=is_today
                     )
                     session.add(digest)
             else:
@@ -755,7 +777,8 @@ class DatabaseManager:
                     focus_category=focus_category,
                     channels_filter=json.dumps(channels_filter) if channels_filter else None,
                     keywords_filter=json.dumps(keywords_filter) if keywords_filter else None,
-                    last_updated=datetime.now()
+                    last_updated=last_updated or datetime.now(),
+                    is_today=is_today
                 )
                 session.add(digest)
             
@@ -783,10 +806,12 @@ class DatabaseManager:
                 "id": digest.id,
                 "date": date,
                 "digest_type": digest_type,
-                "sections": sections_data
+                "sections": sections_data,
+                "is_today": is_today,
+                "last_updated": last_updated or datetime.now()
             }
             
-            logger.info(f"Сохранен дайджест типа '{digest_type}' за {date.strftime('%Y-%m-%d')}")
+            logger.info(f"Сохранен дайджест типа '{digest_type}' за {date.strftime('%Y-%m-%d')}, обновлен: {digest_id is not None}")
             return result
         except Exception as e:
             session.rollback()
@@ -797,69 +822,100 @@ class DatabaseManager:
 
     def find_digests_by_parameters(self, digest_type=None, date=None, 
                                 date_range_start=None, date_range_end=None,
-                                focus_category=None, limit=5):
-            """
-            Поиск дайджестов по параметрам
-            """
-            session = self.Session()
-            try:
-                query = session.query(Digest)
-                
-                if digest_type:
-                    query = query.filter(Digest.digest_type == digest_type)
-                
-                if date:
-                    # Поиск дайджестов на конкретную дату
-                    start_date = datetime(date.year, date.month, date.day)
-                    end_date = start_date + timedelta(days=1)
-                    query = query.filter(Digest.date >= start_date, Digest.date < end_date)
-                
-                if date_range_start and date_range_end:
-                    # Поиск дайджестов, которые охватывают указанный период
-                    query = query.filter(
-                        or_(
-                            # Дайджест начинается внутри указанного периода
-                            and_(
-                                Digest.date_range_start >= date_range_start,
-                                Digest.date_range_start <= date_range_end
-                            ),
-                            # Дайджест заканчивается внутри указанного периода
-                            and_(
-                                Digest.date_range_end >= date_range_start,
-                                Digest.date_range_end <= date_range_end
-                            ),
-                            # Дайджест охватывает весь указанный период
-                            and_(
-                                Digest.date_range_start <= date_range_start,
-                                Digest.date_range_end >= date_range_end
-                            )
+                                focus_category=None, is_today=None, limit=5):
+        """
+        Поиск дайджестов по параметрам
+        
+        Args:
+            digest_type (str): Тип дайджеста (brief/detailed)
+            date (datetime): Конкретная дата дайджеста
+            date_range_start (datetime): Начальная дата диапазона
+            date_range_end (datetime): Конечная дата диапазона
+            focus_category (str): Фокусная категория
+            is_today (bool): Признак дайджеста за текущий день
+            limit (int): Максимальное количество результатов
+            
+        Returns:
+            list: Список дайджестов, соответствующих параметрам
+        """
+        session = self.Session()
+        try:
+            query = session.query(Digest)
+            
+            if digest_type:
+                query = query.filter(Digest.digest_type == digest_type)
+            
+            if date:
+                # Поиск дайджестов на конкретную дату
+                start_date = datetime.combine(date.date(), time(0, 0, 0))
+                end_date = datetime.combine(date.date(), time(23, 59, 59))
+                query = query.filter(Digest.date >= start_date, Digest.date <= end_date)
+            
+            if date_range_start and date_range_end:
+                # Поиск дайджестов, которые охватывают указанный период
+                query = query.filter(
+                    or_(
+                        # Дайджест начинается внутри указанного периода
+                        and_(
+                            Digest.date_range_start >= date_range_start,
+                            Digest.date_range_start <= date_range_end
+                        ),
+                        # Дайджест заканчивается внутри указанного периода
+                        and_(
+                            Digest.date_range_end >= date_range_start,
+                            Digest.date_range_end <= date_range_end
+                        ),
+                        # Дайджест охватывает весь указанный период
+                        and_(
+                            Digest.date_range_start <= date_range_start,
+                            Digest.date_range_end >= date_range_end
                         )
                     )
+                )
+            
+            if focus_category:
+                query = query.filter(Digest.focus_category == focus_category)
                 
-                if focus_category:
-                    query = query.filter(Digest.focus_category == focus_category)
+            # Добавляем фильтр по признаку "сегодняшнего" дайджеста
+            if is_today is not None:
+                if hasattr(Digest, 'is_today'):  # Проверка наличия атрибута
+                    query = query.filter(Digest.is_today == is_today)
+                else:
+                    # Если поле не существует, используем фильтр по текущей дате
+                    today = datetime.now().date()
+                    start_of_today = datetime.combine(today, time(0, 0, 0))
+                    end_of_today = datetime.combine(today, time(23, 59, 59))
+                    query = query.filter(Digest.date >= start_of_today, Digest.date <= end_of_today)
+            
+            # Сортируем по дате создания (сначала новые)
+            digests = query.order_by(Digest.created_at.desc()).limit(limit).all()
+            
+            results = []
+            for digest in digests:
+                # Преобразуем в dict с нужными полями
+                digest_data = {
+                    "id": digest.id,
+                    "date": digest.date,
+                    "digest_type": digest.digest_type,
+                    "focus_category": digest.focus_category,
+                    "date_range_start": digest.date_range_start,
+                    "date_range_end": digest.date_range_end,
+                    "created_at": digest.created_at,
+                    "last_updated": digest.last_updated
+                }
                 
-                # Сортируем по дате создания (сначала новые)
-                digests = query.order_by(Digest.created_at.desc()).limit(limit).all()
+                # Добавляем is_today, если поле существует
+                if hasattr(digest, 'is_today'):
+                    digest_data["is_today"] = digest.is_today
                 
-                results = []
-                for digest in digests:
-                    results.append({
-                        "id": digest.id,
-                        "date": digest.date,
-                        "digest_type": digest.digest_type,
-                        "focus_category": digest.focus_category,
-                        "date_range_start": digest.date_range_start,
-                        "date_range_end": digest.date_range_end,
-                        "created_at": digest.created_at
-                    })
-                
-                return results
-            except Exception as e:
-                logger.error(f"Ошибка при поиске дайджестов: {str(e)}")
-                return []
-            finally:
-                session.close()
+                results.append(digest_data)
+            
+            return results
+        except Exception as e:
+            logger.error(f"Ошибка при поиске дайджестов: {str(e)}")
+            return []
+        finally:
+            session.close()
     def get_digests_containing_date(self, date):
         """
         Находит все дайджесты, которые включают указанную дату

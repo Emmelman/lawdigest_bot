@@ -4,7 +4,7 @@
 """
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import time, datetime, timedelta
 import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -44,12 +44,19 @@ async def period_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
     
     # Разбираем аргументы
     digest_type = "brief"  # Тип дайджеста по умолчанию
+    force_update = False   # Флаг для принудительного обновления
+    today = datetime.now().date()
+    is_today_request = False  # Флаг запроса дайджеста за сегодня
     
     # Проверяем первый аргумент на ключевые слова
     if context.args[0].lower() in ["сегодня", "today"]:
-        start_date = end_date = datetime.now()
-        start_date_str = end_date_str = start_date.strftime("%Y-%m-%d")
-        period_description = "за сегодня"
+        start_date = datetime.combine(today, time.min)
+        end_date = datetime.now()  # Текущее время для сегодняшнего дня
+        start_date_str = today.strftime("%Y-%m-%d")
+        end_date_str = end_date.strftime("%Y-%m-%d %H:%M")
+        period_description = f"за сегодня (до {end_date.strftime('%H:%M')})"
+        is_today_request = True
+        force_update = True  # Всегда обновляем для сегодняшнего дня
         
         # Проверяем, есть ли указание типа дайджеста
         if len(context.args) > 1:
@@ -60,8 +67,10 @@ async def period_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
                 digest_type = "both"
     
     elif context.args[0].lower() in ["вчера", "yesterday"]:
-        start_date = end_date = datetime.now() - timedelta(days=1)
-        start_date_str = end_date_str = start_date.strftime("%Y-%m-%d")
+        yesterday = today - timedelta(days=1)
+        start_date = datetime.combine(yesterday, time.min)
+        end_date = datetime.combine(yesterday, time.max)
+        start_date_str = end_date_str = yesterday.strftime("%Y-%m-%d")
         period_description = "за вчера"
         
         # Проверяем, есть ли указание типа дайджеста
@@ -84,13 +93,24 @@ async def period_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
                     if len(date_parts) >= 6:
                         start_date_str = f"{date_parts[0]}-{date_parts[1]}-{date_parts[2]}"
                         end_date_str = f"{date_parts[3]}-{date_parts[4]}-{date_parts[5]}"
+                        start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
+                        end_date = datetime.strptime(end_date_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
                         period_description = f"за период с {start_date_str} по {end_date_str}"
                     else:
                         raise ValueError("Некорректный формат периода")
                 else:
                     # Только одна дата
                     start_date_str = end_date_str = context.args[0]
+                    start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
+                    end_date = datetime.strptime(end_date_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
                     period_description = f"за {start_date_str}"
+                    
+                    # Проверяем, не "сегодня" ли это
+                    if start_date.date() == today:
+                        is_today_request = True
+                        end_date = datetime.now()  # Текущее время для сегодняшнего дня
+                        period_description = f"за сегодня (до {end_date.strftime('%H:%M')})"
+                        force_update = True
             except Exception as e:
                 await update.message.reply_text(
                     f"Ошибка при разборе даты: {str(e)}\n"
@@ -101,7 +121,16 @@ async def period_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
             # Проверяем, может быть второй аргумент это тип дайджеста
             if context.args[1].lower() in ["brief", "detailed", "both", "краткий", "подробный", "оба"]:
                 start_date_str = end_date_str = context.args[0]
+                start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
+                end_date = datetime.strptime(end_date_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
                 period_description = f"за {start_date_str}"
+                
+                # Проверяем, не "сегодня" ли это
+                if start_date.date() == today:
+                    is_today_request = True
+                    end_date = datetime.now()  # Текущее время для сегодняшнего дня
+                    period_description = f"за сегодня (до {end_date.strftime('%H:%M')})"
+                    force_update = True
                 
                 digest_type_arg = context.args[1].lower()
                 if digest_type_arg in ["detailed", "full", "подробный", "полный"]:
@@ -112,12 +141,30 @@ async def period_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
                 # Два аргумента - начальная и конечная даты
                 start_date_str = context.args[0]
                 end_date_str = context.args[1]
+                start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
+                end_date = datetime.strptime(end_date_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
                 period_description = f"за период с {start_date_str} по {end_date_str}"
+                
+                # Проверяем, содержит ли период только сегодняшний день
+                if start_date.date() == today and end_date.date() == today:
+                    is_today_request = True
+                    end_date = datetime.now()  # Текущее время для сегодняшнего дня
+                    period_description = f"за сегодня (до {end_date.strftime('%H:%M')})"
+                    force_update = True
         elif len(context.args) >= 3:
             # Три и более аргумента - даты и тип дайджеста
             start_date_str = context.args[0]
             end_date_str = context.args[1]
+            start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
+            end_date = datetime.strptime(end_date_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
             period_description = f"за период с {start_date_str} по {end_date_str}"
+            
+            # Проверяем, содержит ли период только сегодняшний день
+            if start_date.date() == today and end_date.date() == today:
+                is_today_request = True
+                end_date = datetime.now()  # Текущее время для сегодняшнего дня
+                period_description = f"за сегодня (до {end_date.strftime('%H:%M')})"
+                force_update = True
             
             # Получаем тип дайджеста
             digest_type_arg = context.args[2].lower()
@@ -128,8 +175,9 @@ async def period_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
         
         # Проверяем формат дат
         try:
-            start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
-            end_date = datetime.strptime(end_date_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+            # Проверка уже выполнена выше, но на всякий случай оставляем дополнительную проверку
+            if not isinstance(start_date, datetime) or not isinstance(end_date, datetime):
+                raise ValueError("Даты не были правильно преобразованы")
         except ValueError:
             await update.message.reply_text(
                 "Ошибка формата даты. Используйте формат YYYY-MM-DD (например, 2025-04-01) "
@@ -162,38 +210,100 @@ async def period_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
     
     # Шаг 1: Проверяем наличие существующего дайджеста за указанный период
     try:
-        existing_digests = db_manager.find_digests_by_parameters(
-            date_range_start=start_date,
-            date_range_end=end_date,
-            digest_type=digest_type if digest_type != "both" else None,
-            limit=1
-        )
-        
-        if existing_digests:
-            digest_id = existing_digests[0]['id']
-            digest = db_manager.get_digest_by_id_with_sections(digest_id)
+        # Для запроса "за сегодня" используем особую логику
+        if is_today_request:
+            # Ищем дайджест за сегодня
+            today_start = datetime.combine(today, time.min)
+            today_end = datetime.combine(today, time.max)
             
-            if digest:
+            existing_digests = db_manager.find_digests_by_parameters(
+                date_range_start=today_start,
+                date_range_end=today_end,
+                digest_type=digest_type if digest_type != "both" else None,
+                limit=1
+            )
+            
+            if existing_digests:
+                digest_id = existing_digests[0]['id']
+                digest = db_manager.get_digest_by_id_with_sections(digest_id)
+                
+                if digest:
+                    # Проверяем время последнего обновления
+                    last_updated = digest.get("last_updated", today_start)
+                    current_time = datetime.now()
+                    
+                    # Если прошло менее 5 минут с последнего обновления, используем существующий дайджест
+                    if (current_time - last_updated).total_seconds() < 300:  # 5 минут
+                        await status_message.edit_text(
+                            f"{status_message.text}\n"
+                            f"✅ Найден актуальный дайджест {period_description}. Отправляю..."
+                        )
+                        
+                        # Отправляем найденный дайджест
+                        safe_text = utils.clean_markdown_text(digest["text"])
+                        chunks = utils.split_text(safe_text)
+                        
+                        for i, chunk in enumerate(chunks):
+                            if i == 0:
+                                text_html = utils.convert_to_html(chunk)
+                                await update.message.reply_text(
+                                    f"{get_digest_type_name(digest['digest_type']).capitalize()} дайджест {period_description}:\n\n{text_html}",
+                                    parse_mode='HTML'
+                                )
+                            else:
+                                await update.message.reply_text(utils.convert_to_html(chunk), parse_mode='HTML')
+                        
+                        return
+                    else:
+                        # Обновляем дайджест с данными с момента последнего обновления
+                        await status_message.edit_text(
+                            f"{status_message.text}\n"
+                            f"🔄 Обновляю существующий дайджест за сегодня (последнее обновление: {last_updated.strftime('%H:%M')})..."
+                        )
+                        
+                        # Меняем начальную дату для сбора только новых данных
+                        start_date = last_updated
+                        force_update = True  # Обязательно обновляем
+            else:
+                # Если дайджест не найден, будем создавать новый
                 await status_message.edit_text(
                     f"{status_message.text}\n"
-                    f"✅ Найден существующий дайджест {period_description}. Отправляю..."
+                    f"🆕 Создаю новый дайджест {period_description}..."
                 )
+        else:
+            # Для обычных запросов используем стандартную логику
+            existing_digests = db_manager.find_digests_by_parameters(
+                date_range_start=start_date,
+                date_range_end=end_date,
+                digest_type=digest_type if digest_type != "both" else None,
+                limit=1
+            )
+            
+            if existing_digests:
+                digest_id = existing_digests[0]['id']
+                digest = db_manager.get_digest_by_id_with_sections(digest_id)
                 
-                # Отправляем найденный дайджест
-                safe_text = utils.clean_markdown_text(digest["text"])
-                chunks = utils.split_text(safe_text)
-                
-                for i, chunk in enumerate(chunks):
-                    if i == 0:
-                        text_html = utils.convert_to_html(chunk)
-                        await update.message.reply_text(
-                            f"{get_digest_type_name(digest['digest_type']).capitalize()} дайджест {period_description}:\n\n{text_html}",
-                            parse_mode='HTML'
-                        )
-                    else:
-                        await update.message.reply_text(utils.convert_to_html(chunk), parse_mode='HTML')
-                
-                return
+                if digest and not force_update:
+                    await status_message.edit_text(
+                        f"{status_message.text}\n"
+                        f"✅ Найден существующий дайджест {period_description}. Отправляю..."
+                    )
+                    
+                    # Отправляем найденный дайджест
+                    safe_text = utils.clean_markdown_text(digest["text"])
+                    chunks = utils.split_text(safe_text)
+                    
+                    for i, chunk in enumerate(chunks):
+                        if i == 0:
+                            text_html = utils.convert_to_html(chunk)
+                            await update.message.reply_text(
+                                f"{get_digest_type_name(digest['digest_type']).capitalize()} дайджест {period_description}:\n\n{text_html}",
+                                parse_mode='HTML'
+                            )
+                        else:
+                            await update.message.reply_text(utils.convert_to_html(chunk), parse_mode='HTML')
+                    
+                    return
     except Exception as e:
         logger.error(f"Ошибка при проверке существующих дайджестов: {str(e)}")
     
@@ -211,7 +321,7 @@ async def period_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
         collect_result = await collector.collect_data(
             start_date=start_date,
             end_date=end_date,
-            force_update=False
+            force_update=force_update
         )
         
         total_messages = collect_result.get("total_new_messages", 0)
@@ -230,41 +340,92 @@ async def period_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
             )
             
             if not existing_messages:
-                await status_message.edit_text(
-                    f"{status_message.text}\n"
-                    f"⚠️ Не найдено сообщений {period_description}. Выполняю глубокий поиск... 🔍"
-                )
-                
-                # Для каждого канала пробуем глубокий сбор
-                for channel in collect_result.get("channels_stats", {}).keys():
-                    # Запускаем глубокий сбор истории
-                    deep_result = await collector.collect_deep_history(
-                        channel,
-                        start_date,
-                        end_date
-                    )
-                    
-                    # Обновляем статус по каждому каналу
-                    if deep_result.get("status") == "success":
-                        saved_count = deep_result.get("saved_count", 0)
-                        total_messages += saved_count
-                        await status_message.edit_text(
-                            f"{status_message.text}\n"
-                            f"📥 Канал {channel}: собрано {saved_count} сообщений глубоким поиском"
-                        )
-                
-                # Проверяем еще раз наличие сообщений
-                existing_messages = db_manager.get_messages_by_date_range(
-                    start_date=start_date,
-                    end_date=end_date
-                )
-                
-                if not existing_messages:
+                # Если запрос за сегодня и нет сообщений, возможно их просто не было с прошлого обновления
+                if is_today_request:
+                    # Расширяем период до начала дня
+                    day_start = datetime.combine(today, time.min)
                     await status_message.edit_text(
                         f"{status_message.text}\n"
-                        f"❌ Не удалось найти сообщения {period_description} даже при глубоком поиске."
+                        f"📅 Расширяю поиск на весь сегодняшний день..."
                     )
-                    return
+                    
+                    # Получаем все сообщения за сегодня
+                    all_today_messages = db_manager.get_messages_by_date_range(
+                        start_date=day_start,
+                        end_date=end_date
+                    )
+                    
+                    if all_today_messages:
+                        await status_message.edit_text(
+                            f"{status_message.text}\n"
+                            f"✅ Найдено {len(all_today_messages)} сообщений за сегодня"
+                        )
+                        start_date = day_start
+                        existing_messages = all_today_messages
+                    else:
+                        await status_message.edit_text(
+                            f"{status_message.text}\n"
+                            f"⚠️ Не найдено сообщений за сегодня. Выполняю глубокий поиск... 🔍"
+                        )
+                        
+                        # Запускаем глубокий поиск для сегодняшнего дня
+                        for channel in collect_result.get("channels_stats", {}).keys():
+                            deep_result = await collector.collect_deep_history(
+                                channel,
+                                day_start,
+                                end_date
+                            )
+                            
+                            if deep_result.get("status") == "success":
+                                saved_count = deep_result.get("saved_count", 0)
+                                total_messages += saved_count
+                                await status_message.edit_text(
+                                    f"{status_message.text}\n"
+                                    f"📥 Канал {channel}: собрано {saved_count} сообщений глубоким поиском"
+                                )
+                        
+                        # Проверяем снова
+                        existing_messages = db_manager.get_messages_by_date_range(
+                            start_date=day_start,
+                            end_date=end_date
+                        )
+                else:
+                    await status_message.edit_text(
+                        f"{status_message.text}\n"
+                        f"⚠️ Не найдено сообщений {period_description}. Выполняю глубокий поиск... 🔍"
+                    )
+                    
+                    # Для каждого канала пробуем глубокий сбор
+                    for channel in collect_result.get("channels_stats", {}).keys():
+                        # Запускаем глубокий сбор истории
+                        deep_result = await collector.collect_deep_history(
+                            channel,
+                            start_date,
+                            end_date
+                        )
+                        
+                        # Обновляем статус по каждому каналу
+                        if deep_result.get("status") == "success":
+                            saved_count = deep_result.get("saved_count", 0)
+                            total_messages += saved_count
+                            await status_message.edit_text(
+                                f"{status_message.text}\n"
+                                f"📥 Канал {channel}: собрано {saved_count} сообщений глубоким поиском"
+                            )
+                
+                # Проверяем еще раз наличие сообщений
+                if not existing_messages:
+                    existing_messages = db_manager.get_messages_by_date_range(
+                        start_date=start_date,
+                        end_date=end_date
+                    )
+                    
+                    if not existing_messages:
+                        await status_message.edit_text(
+                            f"{status_message.text}\n"
+                            f"❌ Не удалось найти сообщения {period_description} даже при глубоком поиске."
+                        )
+                        return
             else:
                 total_messages = len(existing_messages)
                 await status_message.edit_text(
@@ -313,7 +474,7 @@ async def period_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
                     f"✅ Улучшена категоризация {review_result.get('updated', 0)} сообщений"
                 )
         
-        # Шаг 4: Создание дайджеста
+        # Шаг 4: Создание или обновление дайджеста
         await status_message.edit_text(
             f"{status_message.text}\n"
             f"Формирую дайджест... 📝"
@@ -322,15 +483,18 @@ async def period_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
         # Создаем генератор дайджеста
         digester = DigesterAgent(db_manager, GemmaLLM())
         
-        # Определяем количество дней для дайджеста
-        days_back = (end_date.date() - start_date.date()).days + 1
-        
-        # Создаем дайджест
+        # Определяем существующий digest_id для обновления
+        digest_id = None
+        if existing_digests:
+            digest_id = existing_digests[0]['id']
+            
+        # Создаем дайджест с указанием digest_id для обновления существующего
         digest_result = digester.create_digest(
             date=end_date,
-            days_back=days_back,
+            days_back=days_in_period,
             digest_type=digest_type,
-            update_existing=False
+            update_existing=True,
+            digest_id=digest_id
         )
         
         # Получаем ID созданного дайджеста в зависимости от типа
@@ -412,10 +576,12 @@ async def period_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
             return
         
         # Обновляем статус
-        await status_message.edit_text(
-            f"{status_message.text}\n"
-            f"✅ Дайджест успешно создан! Отправляю..."
-        )
+        status_text = f"{status_message.text}\n✅ Дайджест успешно"
+        if is_today_request and existing_digests:
+            status_text += " обновлен!"
+        else:
+            status_text += " создан!"
+        await status_message.edit_text(f"{status_text} Отправляю...")
         
         # Отправляем дайджест
         safe_text = utils.clean_markdown_text(digest["text"])
@@ -439,7 +605,6 @@ async def period_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
             f"{status_message.text}\n"
             f"❌ Произошла ошибка: {str(e)}"
         )
-
 def get_digest_type_name(digest_type):
     """Возвращает название типа дайджеста на русском языке"""
     if digest_type == "brief":
@@ -449,4 +614,4 @@ def get_digest_type_name(digest_type):
     elif digest_type == "both":
         return "полный"
     else:
-        return digest_type
+        return digest_type    

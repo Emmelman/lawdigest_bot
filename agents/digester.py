@@ -936,3 +936,47 @@ class DigesterAgent:
         
         logger.info(f"Обновлено {len(results['updated_digests'])} дайджестов для даты {date.strftime('%Y-%m-%d')}")
         return results
+    def save_digest_with_parameters(self, date, text, sections, digest_type="brief", 
+                              date_range_start=None, date_range_end=None, 
+                              focus_category=None, channels_filter=None, 
+                              keywords_filter=None, digest_id=None):
+        """
+        Сохранение дайджеста с расширенными параметрами
+        
+        Args:
+            date (datetime): Дата дайджеста
+            text (str): Текст дайджеста
+            sections (dict): Словарь секций
+            digest_type (str): Тип дайджеста
+            date_range_start (datetime): Начальная дата диапазона
+            date_range_end (datetime): Конечная дата диапазона
+            focus_category (str): Фокусная категория
+            channels_filter (list): Список каналов для фильтрации
+            keywords_filter (list): Список ключевых слов для фильтрации
+            digest_id (int): ID существующего дайджеста для обновления
+            
+        Returns:
+            dict: Информация о созданном дайджесте
+        """
+        # Определяем признак дайджеста за текущий день
+        today = datetime.now().date()
+        is_today_digest = date.date() == today
+        
+        # Сохраняем дайджест в БД
+        result = self.db_manager.save_digest_with_parameters(
+            date=date,
+            text=text,
+            sections=sections,
+            digest_type=digest_type,
+            date_range_start=date_range_start,
+            date_range_end=date_range_end,
+            focus_category=focus_category,
+            channels_filter=channels_filter,
+            keywords_filter=keywords_filter,
+            digest_id=digest_id,
+            is_today=is_today_digest,
+            last_updated=datetime.now()  # Всегда обновляем время последнего обновления
+        )
+        
+        logger.info(f"Сохранен дайджест типа '{digest_type}' за {date.strftime('%Y-%m-%d')}, ID: {result['id']}")
+        return result

@@ -39,7 +39,7 @@ class Digest(Base):
     text = Column(Text, nullable=False)
     digest_type = Column(String(20), nullable=False, default="brief")  # Тип дайджеста (brief/detailed)
     
-    # Новые поля для расширенных функций
+    # Дополнительные поля для расширенных функций
     date_range_start = Column(DateTime, nullable=True)  # Начало периода дайджеста
     date_range_end = Column(DateTime, nullable=True)    # Конец периода дайджеста
     focus_category = Column(String(100), nullable=True) # Фокус на категорию
@@ -48,6 +48,7 @@ class Digest(Base):
     is_auto_generated = Column(Boolean, default=False)  # Признак автоматической генерации
     last_updated = Column(DateTime, nullable=True)      # Время последнего обновления
     created_at = Column(DateTime, default=datetime.now) # Время создания
+    is_today = Column(Boolean, default=False)           # Признак дайджеста за текущий день
     
     # Индексы для быстрого поиска
     __table_args__ = (
@@ -56,6 +57,7 @@ class Digest(Base):
         Index('idx_digest_date_range', date_range_start, date_range_end),
         Index('idx_digest_focus', focus_category),
         Index('idx_digest_creation', created_at),
+        Index('idx_digest_is_today', is_today),
     )
     def __repr__(self):
         return f"<Digest(id={self.id}, date='{self.date}', type='{self.digest_type}')>"
