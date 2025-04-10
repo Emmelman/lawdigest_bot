@@ -881,7 +881,14 @@ async def show_digest_by_id(message, digest_id, db_manager):
 async def handle_digest_generation(update, context, db_manager, start_date, end_date, 
                           description, focus_category=None, channels=None, keywords=None, force_update=False):
     """Асинхронный запуск генерации дайджеста с использованием оптимизаций workflow"""
-    
+    # Определяем количество дней для обработки на основе дат
+    if start_date and end_date:
+        days_back = (end_date.date() - start_date.date()).days + 1
+        logger.info(f"Рассчитан period days_back={days_back} на основе указанного диапазона")
+    else:
+        days_back = 1  # Значение по умолчанию
+        logger.info(f"Используется значение days_back={days_back} по умолчанию")
+   
     # Определяем, откуда пришел запрос (от сообщения или колбэка)
    # message = update.message if hasattr(update, 'message') else update.message
     #user_id = update.effective_user.id
@@ -891,18 +898,23 @@ async def handle_digest_generation(update, context, db_manager, start_date, end_
         # Это объект Update с callback_query
      #   message = update.callback_query.message
       #  user_id = update.callback_query.from_user.id
-    if hasattr(update, 'message'):
+    # Определяем, откуда пришел запрос (от сообщения или колбэка)
+    if hasattr(update, 'message') and update.message:
         # Это объект Update с message
         message = update.message
         user_id = update.effective_user.id
-    elif hasattr(update, 'message') and update.message:
-        # Это объект CallbackQuery с message
-        message = update.message
-        user_id = update.from_user.id
+    elif hasattr(update, 'callback_query') and update.callback_query:
+        # Это объект Update с callback_query
+        message = update.callback_query.message
+        user_id = update.callback_query.from_user.id
     else:
         # Fallback для любых других случаев
-        message = update.effective_message
-        user_id = update.from_user.id if hasattr(update, 'from_user') else None
+        message = update.effective_message if hasattr(update, 'effective_message') else None
+        user_id = update.effective_user.id if hasattr(update, 'effective_user') else None
+        
+    if not message:
+        logger.error("Не удалось определить источник сообщения")
+        return
 
     # Обработка дат и проверка предыдущей генерации (оставляем как есть)
     if not start_date:
@@ -963,7 +975,12 @@ async def handle_digest_generation(update, context, db_manager, start_date, end_
         collector = DataCollectorAgent(db_manager)
         
         # Используем асинхронный метод collect_data вместо _collect_all_channels_parallel
-        collect_result = await collector.collect_data(days_back=days_back,force_update=force_update)
+        collect_result = await collector.collect_data(
+        days_back=days_back,
+        force_update=force_update,
+        start_date=start_date,
+        end_date=end_date
+        )
         
         total_messages = collect_result.get("total_new_messages", 0)
         

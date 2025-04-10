@@ -647,11 +647,38 @@ class DigesterAgent:
                 logger.info(f"Найдено {len(all_messages)} сообщений без применения фильтров")
                 messages = all_messages
             else:
-                logger.error("Сообщения за указанный период не найдены даже без фильтров")
-                return {
-                    "status": "no_messages",
-                    "message": "Нет сообщений, соответствующих критериям фильтрации"
-                }
+                logger.info("Сообщения за указанный период не найдены, запускаем сбор из Telegram...")
+                from agents.data_collector import DataCollectorAgent
+                import asyncio
+                
+                collector = DataCollectorAgent(self.db_manager)
+                
+                # Создаем цикл событий для синхронного вызова асинхронной функции
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+                try:
+                    # Запускаем сбор с явным указанием start_date и end_date
+                    collect_result = loop.run_until_complete(collector.collect_data(
+                        days_back=days_back,
+                        force_update=True,
+                        start_date=start_date,
+                        end_date=end_date
+                    ))
+                    
+                    logger.info(f"Результат сбора данных: {collect_result}")
+                    
+                    # Проверяем снова после сбора
+                    messages = self.db_manager.get_messages_by_date_range(start_date, end_date)
+                finally:
+                    loop.close()
+                    
+                if not messages:
+                    logger.error("Сообщения за указанный период не найдены даже после сбора из Telegram")
+                    return {
+                        "status": "no_messages",
+                        "message": "Нет сообщений, соответствующих критериям фильтрации"
+                    }
         
         # Оставшаяся часть метода без изменений...
         # Группировка по категориям

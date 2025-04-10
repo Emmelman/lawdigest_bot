@@ -237,6 +237,7 @@ class DataCollectorAgent:
     async def _get_channel_messages_with_client(self, client, channel, days_back=1, limit_per_request=100, start_date=None, end_date=None):
         """
         Получение сообщений из канала за указанный период с использованием переданного клиента
+        с оптимизацией для исторических данных
         """
         try:
             # Получаем сущность канала
@@ -246,25 +247,57 @@ class DataCollectorAgent:
             if start_date is None or end_date is None:
                 end_date = datetime.now()
                 start_date = end_date - timedelta(days=days_back)
+            else:
+            # Явно устанавливаем начало и конец дня для корректного диапазона
+                start_date = datetime.combine(start_date.date(), datetime.min.time())
+                end_date = datetime.combine(end_date.date(), datetime.max.time())
+
+            logger.info(f"Скорректированный диапазон дат: {start_date.strftime('%Y-%m-%d %H:%M:%S')} - {end_date.strftime('%Y-%m-%d %H:%M:%S')}")
+            # Определяем, является ли запрос историческим
+            is_historical = start_date.date() < datetime.now().date() - timedelta(days=2)
             
-            logger.info(f"Получение сообщений из канала {channel} с {start_date.strftime('%Y-%m-%d %H:%M')} по {end_date.strftime('%Y-%m-%d %H:%M')}")
+            if is_historical:
+                # Увеличиваем лимит для исторических запросов
+                historical_limit = 200
+                logger.info(f"Исторический запрос для канала {channel} с {start_date.strftime('%Y-%m-%d %H:%M')} "
+                        f"по {end_date.strftime('%Y-%m-%d %H:%M')} с увеличенным лимитом {historical_limit}")
+            else:
+                historical_limit = limit_per_request
+                logger.info(f"Получение сообщений из канала {channel} с {start_date.strftime('%Y-%m-%d %H:%M')} "
+                        f"по {end_date.strftime('%Y-%m-%d %H:%M')}")
             
             # Проверка на случай, если entity None
             if entity is None:
                 logger.error(f"Не удалось получить сущность для канала {channel}")
                 return []
             
-            # Получаем сообщения с пагинацией
-            offset_id = 0
+            # Инициализация переменных для сбора сообщений
             all_messages = []
             total_messages = 0
+            max_iterations = 50  # Ограничение на количество итераций для безопасности
+            current_iteration = 0
             
-            while True:
+            # Начальные параметры запроса
+            offset_id = 0
+            
+            # Для исторических данных начинаем с конкретной даты
+            initial_offset_date = start_date if is_historical else None
+            
+            while current_iteration < max_iterations:
+                current_iteration += 1
+                
                 try:
+                    # Для первого запроса используем дату старта как точку отсчета для исторических данных
+                    current_offset_date = initial_offset_date if current_iteration == 1 and is_historical else None
+                    
+                    logger.debug(f"Запрос #{current_iteration} для канала {channel}, "
+                            f"offset_id={offset_id}, offset_date={current_offset_date}")
+                    
+                    # Выполняем запрос с учетом исторических параметров
                     messages = await client(GetHistoryRequest(
                         peer=entity,
-                        limit=limit_per_request,
-                        offset_date=None,
+                        limit=historical_limit,
+                        offset_date=current_offset_date,
                         offset_id=offset_id,
                         max_id=0,
                         min_id=0,
@@ -273,48 +306,88 @@ class DataCollectorAgent:
                     ))
                     
                     if not messages or not hasattr(messages, 'messages') or not messages.messages:
+                        logger.debug(f"Нет сообщений в ответе для канала {channel}")
                         break
                     
                     messages_list = messages.messages
-                    total_messages += len(messages_list)
+                    batch_size = len(messages_list)
+                    total_messages += batch_size
                     
-                    # Фильтруем сообщения по дате
+                    if batch_size == 0:
+                        logger.debug(f"Получен пустой список сообщений для канала {channel}")
+                        break
+                    
+                    # Фильтруем сообщения по дате с подробным логированием
                     filtered_messages = []
+                    oldest_date = None
+                    newest_date = None
+                    
                     for msg in messages_list:
                         msg_date = msg.date.replace(tzinfo=None)
+                        
+                        # Отслеживаем диапазон дат в текущем пакете
+                        if oldest_date is None or msg_date < oldest_date:
+                            oldest_date = msg_date
+                        if newest_date is None or msg_date > newest_date:
+                            newest_date = msg_date
+                        
                         if start_date <= msg_date <= end_date:
                             filtered_messages.append(msg)
+                    
+                    # Логируем информацию о датах в текущем пакете
+                    if batch_size > 0 and oldest_date and newest_date:
+                        logger.debug(f"Пакет #{current_iteration}: получено {batch_size} сообщений "
+                                f"с {oldest_date.strftime('%Y-%m-%d %H:%M')} по {newest_date.strftime('%Y-%m-%d %H:%M')}, "
+                                f"отфильтровано {len(filtered_messages)}")
                     
                     all_messages.extend(filtered_messages)
                     
                     # Проверяем, нужно ли продолжать пагинацию
-                    if len(messages_list) < limit_per_request:
+                    if batch_size < historical_limit:
+                        logger.debug(f"Достигнут конец списка сообщений (получено {batch_size} < {historical_limit})")
                         break
                     
                     # Проверяем дату последнего сообщения
                     if messages_list:
                         last_date = messages_list[-1].date.replace(tzinfo=None)
                         if last_date < start_date:
+                            logger.debug(f"Достигнута дата ранее запрошенного периода: {last_date.strftime('%Y-%m-%d %H:%M')}")
                             break
                         
+                        # Устанавливаем новое смещение для следующего запроса
                         offset_id = messages_list[-1].id
+                        
+                        # Если все сообщения в пакете вне запрошенного периода и старше начала периода, прекращаем поиск
+                        if len(filtered_messages) == 0 and newest_date and newest_date < start_date:
+                            logger.debug(f"Все сообщения в пакете старше начала периода, прекращаем поиск")
+                            break
                     else:
                         break
                     
-                    # Добавляем небольшую задержку между запросами пагинации
-                    await asyncio.sleep(0.5)
+                    # Добавляем задержку между запросами пагинации - большую для исторических запросов
+                    await asyncio.sleep(1.0 if is_historical else 0.5)
                     
                 except Exception as inner_e:
-                    logger.error(f"Ошибка при получении истории сообщений из канала {channel}: {str(inner_e)}")
-                    break
+                    logger.error(f"Ошибка при получении истории сообщений из канала {channel} (итерация {current_iteration}): {str(inner_e)}")
+                    # Для исторических запросов делаем паузу и пробуем еще раз
+                    if is_historical and current_iteration < max_iterations - 1:
+                        logger.info(f"Ждем 3 секунды перед следующей попыткой исторического запроса")
+                        await asyncio.sleep(3)
+                        continue
+                    else:
+                        break
             
-            logger.info(f"Всего получено {total_messages} сообщений, отфильтровано {len(all_messages)} "
-                    f"за указанный период из канала {channel}")
+            # Итоговое логирование
+            if current_iteration >= max_iterations:
+                logger.warning(f"Достигнуто максимальное количество итераций ({max_iterations}) для канала {channel}")
+            
+            logger.info(f"Всего получено {total_messages} сообщений за {current_iteration} запросов, "
+                    f"отфильтровано {len(all_messages)} за указанный период из канала {channel}")
             
             return all_messages
             
         except Exception as e:
-            logger.error(f"Ошибка при получении сообщений из канала {channel}: {str(e)}")
+            logger.error(f"Ошибка при получении сообщений из канала {channel}: {str(e)}", exc_info=True)
             return []
         
 
@@ -526,20 +599,34 @@ class DataCollectorAgent:
             if client and session_manager:
                 await session_manager.release_client(client)
 
-    # В файле agents/data_collector.py
-
+    
+    async def _get_newest_messages(self, client, channel, limit=20):
+        """Получение самых новых сообщений из канала"""
+        try:
+            entity = await client.get_entity(channel)
+            messages = await client(GetHistoryRequest(
+                peer=entity,
+                limit=limit,
+                offset_date=None,  # Без смещения для получения самых новых
+                offset_id=0,
+                max_id=0,
+                min_id=0,
+                add_offset=0,
+                hash=0
+            ))
+            
+            if not messages or not messages.messages:
+                return []
+                
+            logger.info(f"Получено {len(messages.messages)} новых сообщений из канала {channel}")
+            return messages.messages
+        except Exception as e:
+            logger.error(f"Ошибка при получении новых сообщений: {str(e)}")
+            return []
     async def _collect_channels(self, client, days_back=1, channels=None, 
                             start_date=None, end_date=None, force_update=False):
         """
         Сбор данных из каналов с использованием одного клиента
-        
-        Args:
-            client (TelegramClient): Telegram клиент
-            days_back (int): За сколько дней назад собирать сообщения
-            channels (list, optional): Список каналов для сбора данных
-            start_date (datetime, optional): Начальная дата для сбора данных
-            end_date (datetime, optional): Конечная дата для сбора данных
-            force_update (bool): Принудительно обрабатывать все сообщения
         """
         results = {}
         
@@ -547,7 +634,7 @@ class DataCollectorAgent:
         channels_to_process = channels or TELEGRAM_CHANNELS
         # ВАЖНО! Приоритет явно указанного диапазона дат
         use_date_range = start_date is not None and end_date is not None
-       
+    
         if use_date_range:
             logger.info(f"Использую явно указанный период: {start_date.strftime('%Y-%m-%d %H:%M')} - {end_date.strftime('%Y-%m-%d %H:%M')}")
         else:
@@ -556,6 +643,10 @@ class DataCollectorAgent:
             start_date = end_date - timedelta(days=days_back)
             logger.info(f"Рассчитываю период от текущей даты: последние {days_back} дней")
 
+        # Убедимся, что обрабатываем полные дни
+        start_date = datetime.combine(start_date.date(), datetime.min.time())
+        end_date = datetime.combine(end_date.date(), datetime.max.time())
+        logger.info(f"Скорректированный диапазон дат: {start_date.strftime('%Y-%m-%d %H:%M:%S')} - {end_date.strftime('%Y-%m-%d %H:%M:%S')}")
                 
         # ВАЖНО: Обрабатываем каналы последовательно, используя один клиент
         for channel in channels_to_process:
@@ -570,6 +661,29 @@ class DataCollectorAgent:
                     start_date=start_date, 
                     end_date=end_date
                 )
+                
+                # Дополнительная проверка на сегодняшние сообщения
+                today = datetime.now().date()
+                if end_date.date() >= today:
+                    logger.info(f"Выполняю дополнительный запрос для получения самых свежих сообщений из канала {channel}")
+                    try:
+                        # Специальный запрос только для самых новых сообщений 
+                        latest_messages = await self._get_newest_messages(client, channel, 20)
+                        
+                        # Фильтруем и добавляем к результатам
+                        if latest_messages:
+                            added_count = 0
+                            for msg in latest_messages:
+                                msg_date = msg.date.replace(tzinfo=None)
+                                if start_date <= msg_date <= end_date and msg.id not in [m.id for m in messages]:
+                                    logger.info(f"Найдено новое сообщение в канале {channel} от {msg_date.strftime('%Y-%m-%d %H:%M:%S')}")
+                                    messages.append(msg)
+                                    added_count += 1
+                            
+                            if added_count > 0:
+                                logger.info(f"Добавлено {added_count} свежих сообщений из канала {channel}")
+                    except Exception as e:
+                        logger.error(f"Ошибка при получении новых сообщений из канала {channel}: {str(e)}")
                 
                 # Если нет принудительного обновления, фильтруем существующие сообщения
                 existing_ids = []
@@ -751,12 +865,26 @@ class DataCollectorAgent:
                 for msg in messages_list:
                     # Преобразуем дату из Telegram (aware) в naive datetime
                     msg_date = msg.date.replace(tzinfo=None)
+                    # Поправка на часовой пояс МСК (UTC+3)
+                    # Раскомментируйте следующие строки, если в телеграме время UTC, а вам нужно московское:
+                    moscow_offset = 3  # Часы
+                    msg_date = msg_date + timedelta(hours=moscow_offset)
                     
-                    if start_date <= msg_date <= end_date:
+                    # Логируем для отладки
+                    is_in_range = start_date <= msg_date <= end_date
+                    if is_in_range or msg.id % 20 == 0:  # Логируем каждое 20-е сообщение для отладки
+                        logger.debug(f"Сообщение {msg.id} от {msg_date.strftime('%Y-%m-%d %H:%M:%S')} " +
+                                    (f"ВХОДИТ в диапазон {start_date.strftime('%Y-%m-%d')} - {end_date.strftime('%Y-%m-%d')}" 
+                                        if is_in_range else f"вне диапазона дат"))
+                
+                    if is_in_range:
                         filtered_messages.append(msg)
-                        logger.debug(f"Сообщение {msg.id} от {msg_date.strftime('%Y-%m-%d %H:%M')} в диапазоне дат")
-                    else:
-                        logger.debug(f"Сообщение {msg.id} от {msg_date.strftime('%Y-%m-%d %H:%M')} вне диапазона дат")
+
+                    #if start_date <= msg_date <= end_date:
+                     #   filtered_messages.append(msg)
+                      #  logger.debug(f"Сообщение {msg.id} от {msg_date.strftime('%Y-%m-%d %H:%M')} в диапазоне дат")
+                    #else:
+                     #   logger.debug(f"Сообщение {msg.id} от {msg_date.strftime('%Y-%m-%d %H:%M')} вне диапазона дат")
                         
                 all_messages.extend(filtered_messages)
                 
