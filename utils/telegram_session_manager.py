@@ -55,10 +55,10 @@ class TelegramSessionManager:
             
             # Генерируем уникальное имя сессии, основанное на текущем времени и PID
             # чтобы избежать конфликтов между разными запросами
-            unique_session = f"{self.session_name}_{int(time.time())}_{os.getpid()}"
+            session_path = "lawdigest_session"  # Фиксированное имя сессии
             
             # Создаем нового клиента при каждом запросе для надежности
-            client = TelegramClient(unique_session, api_id, api_hash)
+            client = TelegramClient(session_path, api_id, api_hash)
             
             # Ожидаем между запросами, чтобы избежать слишком частых подключений
             current_time = time.time()
@@ -71,14 +71,12 @@ class TelegramSessionManager:
             self._last_operation_time = time.time()
             
             try:
-                # Запускаем клиента
+                # Явно указываем использование сохранённой авторизации
                 await client.start()
-                self._active_operations += 1
-                logger.debug(f"Создан новый клиент Telegram (активно: {self._active_operations})")
+                logger.info("Подключен клиент Telegram (сессия сохранена)")
                 return client
             except Exception as e:
                 logger.error(f"Ошибка при создании клиента Telegram: {str(e)}")
-                # Если не удалось создать клиента, делаем паузу подольше
                 await asyncio.sleep(3)
                 raise
     

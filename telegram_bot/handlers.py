@@ -248,8 +248,8 @@ async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_ma
             
             # Асинхронно собираем данные с явным указанием периода
             collect_result = await collector.collect_data(
-                days_back=days_back, 
-                force_update=False,
+                days_back=1, 
+                force_update=True,
                 start_date=start_date,
                 end_date=end_date
             )
@@ -319,7 +319,15 @@ async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_ma
                 limit=30,
                 batch_size=5
             )
-
+            # Добавляем обработку результата
+            if review_result and review_result.get("updated", 0) > 0:
+                await status_message.edit_text(
+                    f"{status_message.text}\n✅ Улучшена категоризация {review_result.get('updated', 0)} сообщений."
+                )
+            elif review_result:
+                await status_message.edit_text(
+                    f"{status_message.text}\n👍 Проверено {review_result.get('total', 0)} сообщений, изменения не требуются."
+                )
         # Создаем дайджест с явным указанием даты и периода
         from agents.digester import DigesterAgent
         from llm.gemma_model import GemmaLLM

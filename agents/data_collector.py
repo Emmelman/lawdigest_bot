@@ -545,16 +545,18 @@ class DataCollectorAgent:
         
         # Используем переданные каналы или берем из настроек
         channels_to_process = channels or TELEGRAM_CHANNELS
-        
-        # Определяем даты для сбора с приоритетом на явно заданные даты
-        if start_date and end_date:
-            logger.info(f"Использую явно указанный период: {start_date.strftime('%Y-%m-%d')} - {end_date.strftime('%Y-%m-%d')}")
+        # ВАЖНО! Приоритет явно указанного диапазона дат
+        use_date_range = start_date is not None and end_date is not None
+       
+        if use_date_range:
+            logger.info(f"Использую явно указанный период: {start_date.strftime('%Y-%m-%d %H:%M')} - {end_date.strftime('%Y-%m-%d %H:%M')}")
         else:
-            # Иначе рассчитываем от текущей даты
+            # Только если даты не указаны явно, рассчитываем от текущей даты
             end_date = datetime.now()
             start_date = end_date - timedelta(days=days_back)
             logger.info(f"Рассчитываю период от текущей даты: последние {days_back} дней")
-        
+
+                
         # ВАЖНО: Обрабатываем каналы последовательно, используя один клиент
         for channel in channels_to_process:
             try:
