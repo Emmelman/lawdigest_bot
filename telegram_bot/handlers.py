@@ -15,6 +15,10 @@ from agents.data_collector import DataCollectorAgent
 from agents.analyzer import AnalyzerAgent
 from agents.critic import CriticAgent
 from utils.text_utils import TextUtils
+from telegram_bot.improved_message_handler import improved_message_handler
+
+from telegram_bot.period_command import period_command
+
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +48,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_m
     await update.message.reply_text(
         f"Здравствуйте, {user.first_name}! Я бот для дайджеста правовых новостей.\n\n"
         "Доступные команды:\n"
-        "/digest - получить краткий дайджест\n"
-        "/digest_detailed - получить подробный дайджест\n"
+        #"/digest - получить краткий дайджест\n"
+        #"/digest_detailed - получить подробный дайджест\n"
+        "/period - получить дайджест за произвольный период (сегодня/вчера/YYYY-MM-DD)\n"
         "/category - выбрать категорию новостей\n"
         "/help - получить справку"
     )
@@ -55,8 +60,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_ma
     await update.message.reply_text(
         "Я могу предоставить вам дайджест правовых новостей.\n\n"
         "Доступные команды:\n"
-        "/digest - получить краткий дайджест\n"
-        "/digest_detailed - получить подробный дайджест\n"
+        #"/digest - получить краткий дайджест\n"
+        #"/digest_detailed - получить подробный дайджест\n"
+        "/period - получить дайджест за произвольный период (сегодня/вчера/YYYY-MM-DD)\n"
         "/category - выбрать категорию новостей\n"
         "/help - получить справку\n\n"
         "Вы также можете задать мне вопрос по правовым новостям."
@@ -432,22 +438,6 @@ async def category_command(update: Update, context: ContextTypes.DEFAULT_TYPE, d
         reply_markup=reply_markup
     )
 
-async def generate_digest_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_manager):
-    """Обработчик команды /generate - запуск генерации дайджеста"""
-    keyboard = [
-        [InlineKeyboardButton("За сегодня", callback_data="gen_digest_today")],
-        [InlineKeyboardButton("За вчера", callback_data="gen_digest_yesterday")],
-        [InlineKeyboardButton("За период", callback_data="gen_digest_range")],
-        [InlineKeyboardButton("С фокусом на категорию", callback_data="gen_digest_category")],
-        [InlineKeyboardButton("С фильтрацией по каналам", callback_data="gen_digest_channels")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        "Выберите тип дайджеста для генерации:", 
-        reply_markup=reply_markup
-    )
-
 async def list_digests_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_manager):
     """Обработчик команды /list - список доступных дайджестов"""
     # Получаем последние 10 дайджестов
@@ -494,6 +484,7 @@ async def list_digests_command(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, db_manager, llm_model):
+    return await improved_message_handler(update, context, db_manager, llm_model)
     """Обработчик текстовых сообщений"""
     user_message = update.message.text
     
@@ -706,92 +697,20 @@ async def handle_channel_period_input(update, context, db_manager, user_input):
         )
 
 # Обработчик кнопок и генерация дайджеста (см. ранее определенную функцию handle_digest_generation)
-async def handle_gen_digest_callback(query, context, db_manager):
-    """Обработка колбэков для генерации дайджеста"""
-    action = query.data.replace("gen_digest_", "")
-    
-    if action == "today":
-        # Генерация за сегодня
-        today = datetime.now()
-        await handle_digest_generation(
-            query, context, db_manager, today, today, "За сегодня"
-        )
-    elif action == "yesterday":
-        # Генерация за вчера
-        yesterday = datetime.now() - timedelta(days=1)
-        await handle_digest_generation(
-            query, context, db_manager, yesterday, yesterday, "За вчера"
-        )
-    elif action == "range":
-        # Запрашиваем диапазон дат
-        context.user_data["awaiting_date_range"] = True
-        await query.message.reply_text(
-            "Укажите диапазон дат в формате ДД.ММ.ГГГГ-ДД.ММ.ГГГГ, например: 01.04.2025-07.04.2025"
-        )
-    elif action == "category":
-        # Выбор категории для фокуса
-        keyboard = []
-        for category in CATEGORIES + ["другое"]:
-            keyboard.append([
-                InlineKeyboardButton(
-                    category, callback_data=f"gen_digest_cat_{category}"
-                )
-            ])
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.message.reply_text(
-            "Выберите категорию для формирования фокусированного дайджеста:", 
-            reply_markup=reply_markup
-        )
-    elif action == "channels":
-        # Выбор каналов для фильтрации
-        keyboard = []
-        for channel in TELEGRAM_CHANNELS:
-            display_name = channel.replace("@", "") if channel.startswith("@") else channel
-            keyboard.append([
-                InlineKeyboardButton(
-                    display_name, callback_data=f"gen_digest_chan_{channel}"
-                )
-            ])
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.message.reply_text(
-            "Выберите канал для формирования дайджеста:", 
-            reply_markup=reply_markup
-        )
-    elif action.startswith("cat_"):
-        # Выбрана категория для фокуса
-        category = action.replace("cat_", "")
-        context.user_data["focus_category"] = category
-        context.user_data["awaiting_category_period"] = True
-        await query.message.reply_text(
-            f"Выбрана категория: {category}\n"
-            "Теперь укажите период в формате ДД.ММ.ГГГГ или ДД.ММ.ГГГГ-ДД.ММ.ГГГГ, "
-            "или напишите 'сегодня' или 'вчера'"
-        )
-    elif action.startswith("chan_"):
-        # Выбран канал для фильтрации
-        channel = action.replace("chan_", "")
-        context.user_data["focus_channel"] = channel
-        context.user_data["channels"] = [channel]
-        await query.message.reply_text(
-            f"Выбран канал: {channel}\n"
-            "Теперь укажите период в формате ДД.ММ.ГГГГ или ДД.ММ.ГГГГ-ДД.ММ.ГГГГ, "
-            "или напишите 'сегодня' или 'вчера'"
-        )
-        context.user_data["awaiting_channel_period"] = True
-
-# Общий обработчик колбэков
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, db_manager):
     """Обработчик нажатий на кнопки"""
     query = update.callback_query
     await query.answer()
     
-    # Обработка запросов на генерацию дайджеста
-    if query.data.startswith("gen_digest_"):
-        await handle_gen_digest_callback(query, context, db_manager)
     # Обработка запросов на просмотр дайджеста
-    elif query.data.startswith("show_digest_"):
-        digest_id = int(query.data.replace("show_digest_", ""))
-        await show_digest_by_id(query.message, digest_id, db_manager)
+    if query.data.startswith("show_digest_"):
+        try:
+            digest_id = int(query.data.replace("show_digest_", ""))
+            await show_digest_by_id(query.message, digest_id, db_manager)
+        except Exception as e:
+            logger.error(f"Ошибка при просмотре дайджеста: {str(e)}")
+            await query.message.reply_text(f"Произошла ошибка при загрузке дайджеста: {str(e)}")
+    
     # Обработка выбора категории
     elif query.data.startswith("cat_"):
         # Формат: cat_[тип]_[категория]
@@ -836,6 +755,30 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, db
             for chunk in chunks:
                 text_html = utils.convert_to_html(chunk)
                 await query.message.reply_text(text_html, parse_mode='HTML')
+    
+    # Обработка других типов кнопок
+    elif query.data.startswith("gen_digest_"):
+        # Перенаправляем на команду /period с соответствующими параметрами
+        if query.data == "gen_digest_today":
+            # Генерация дайджеста за сегодня
+            await query.message.reply_text("Использую команду /period сегодня")
+            context.args = ["сегодня"]
+            await period_command(update, context, db_manager)
+        elif query.data == "gen_digest_yesterday":
+            # Генерация дайджеста за вчера
+            await query.message.reply_text("Использую команду /period вчера")
+            context.args = ["вчера"]
+            await period_command(update, context, db_manager)
+        else:
+            # Для остальных запросов на генерацию
+            await query.message.reply_text(
+                "Эта функция теперь доступна через команду /period. Примеры:\n"
+                "/period сегодня\n"
+                "/period вчера\n"
+                "/period 2025-04-01 2025-04-10 detailed"
+            )
+    else:
+        await query.message.reply_text(f"Неизвестная команда: {query.data}")
 
 # Вспомогательные функции
 async def show_digest_by_id(message, digest_id, db_manager):
