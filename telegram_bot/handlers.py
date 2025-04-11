@@ -543,7 +543,137 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, db
             "Извините, произошла ошибка при обработке вашего запроса. "
             "Пожалуйста, попробуйте позже или воспользуйтесь командами /digest или /category."
         )
+async def category_selection_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_manager):
+    """Улучшенный обработчик команды /cat - выбор категории из дайджеста"""
+    
+    # Шаг 1: Получаем список доступных дайджестов
+    digests = db_manager.find_digests_by_parameters(limit=10)
+    
+    if not digests:
+        await update.message.reply_text("Дайджесты еще не сформированы.")
+        return
+    
+    # Группируем по датам и типам (краткий/подробный)
+    digests_by_date = {}
+    for digest in digests:
+        date_str = digest['date'].strftime('%Y-%m-%d')
+        if date_str not in digests_by_date:
+            digests_by_date[date_str] = []
+        
+        # Учитываем диапазон дат
+        if digest.get("date_range_start") and digest.get("date_range_end"):
+            days_diff = (digest["date_range_end"] - digest["date_range_start"]).days
+            if days_diff > 0:
+                date_str = f"{digest['date_range_start'].strftime('%Y-%m-%d')} - {digest['date_range_end'].strftime('%Y-%m-%d')}"
+        
+        digests_by_date[date_str].append(digest)
+    
+    # Создаем кнопки для выбора дайджеста
+    keyboard = []
+    for date_str, date_digests in sorted(digests_by_date.items(), reverse=True):
+        # Если несколько типов дайджестов за одну дату, создаем отдельные кнопки
+        if len(date_digests) > 1:
+            for digest in date_digests:
+                is_today = digest.get('is_today', False)
+                today_mark = "📌 " if is_today else ""
+                type_mark = "📝" if digest['digest_type'] == "brief" else "📚"
+                button_text = f"{today_mark}{type_mark} {date_str} ({digest['digest_type']})"
+                keyboard.append([InlineKeyboardButton(button_text, callback_data=f"select_digest_{digest['id']}")])
+        else:
+            # Если только один дайджест за дату, упрощаем отображение
+            digest = date_digests[0]
+            is_today = digest.get('is_today', False)
+            today_mark = "📌 " if is_today else ""
+            type_mark = "📝" if digest['digest_type'] == "brief" else "📚"
+            button_text = f"{today_mark}{type_mark} {date_str}"
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"select_digest_{digest['id']}")])
+    
+    # Добавляем кнопку "Сегодня" для быстрого доступа к сегодняшнему дайджесту
+    today_digests = [d for d in digests if d.get('is_today', False)]
+    if today_digests:
+        keyboard.append([InlineKeyboardButton("📆 Сегодняшний дайджест", callback_data="select_today_digest")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "Выберите дайджест для просмотра категорий:", 
+        reply_markup=reply_markup
+    )
 
+# Дополнительный обработчик для кнопок выбора дайджеста
+async def handle_digest_selection(update: Update, context: ContextTypes.DEFAULT_TYPE, db_manager, callback_data):
+    """Обработчик выбора дайджеста из списка"""
+    query = update.callback_query
+    await query.answer()
+    
+    if callback_data.startswith("select_digest_"):
+        digest_id = int(callback_data.replace("select_digest_", ""))
+        await show_digest_categories(query.message, digest_id, db_manager)
+    elif callback_data == "select_today_digest":
+        # Найти самый свежий дайджест за сегодня
+        today_digests = db_manager.find_digests_by_parameters(is_today=True, limit=5)
+        if today_digests:
+            # Группируем по типу и берем самый ранний для каждого типа
+            unique_digests = {}
+            for d in today_digests:
+                d_type = d["digest_type"]
+                if d_type not in unique_digests or d["id"] < unique_digests[d_type]["id"]:
+                    unique_digests[d_type] = d
+            
+            # Предпочитаем краткий дайджест
+            if "brief" in unique_digests:
+                digest_id = unique_digests["brief"]["id"]
+            else:
+                digest_id = today_digests[0]["id"]
+            
+            await show_digest_categories(query.message, digest_id, db_manager)
+        else:
+            await query.message.reply_text("Дайджест за сегодня не найден.")
+
+async def show_digest_categories(message, digest_id, db_manager):
+    """Показывает категории из выбранного дайджеста"""
+    digest = db_manager.get_digest_by_id_with_sections(digest_id)
+    
+    if not digest:
+        await message.reply_text("Дайджест не найден.")
+        return
+    
+    # Получаем список категорий из дайджеста
+    categories = []
+    for section in digest["sections"]:
+        categories.append(section["category"])
+    
+    # Создаем кнопки для выбора категории
+    keyboard = []
+    for category in categories:
+        icon = get_category_icon(category)
+        keyboard.append([InlineKeyboardButton(f"{icon} {category}", callback_data=f"cat_{digest_id}_{category}")])
+    
+    # Добавляем кнопку "Весь дайджест"
+    keyboard.append([InlineKeyboardButton("📄 Весь дайджест", callback_data=f"full_digest_{digest_id}")])
+    
+    # Добавляем кнопку "Назад к списку дайджестов"
+    keyboard.append([InlineKeyboardButton("⬅️ Назад к списку", callback_data="back_to_digest_list")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await message.reply_text(
+        f"Дайджест за {digest['date'].strftime('%d.%m.%Y')} ({digest['digest_type']}).\n"
+        f"Выберите категорию для просмотра:",
+        reply_markup=reply_markup
+    )
+
+# Вспомогательная функция для получения иконки категории
+def get_category_icon(category):
+    """Возвращает иконку для категории"""
+    icons = {
+        'законодательные инициативы': '📝',
+        'новая судебная практика': '⚖️',
+        'новые законы': '📜',
+        'поправки к законам': '✏️',
+        'другое': '📌'
+    }
+    return icons.get(category, '•')
 # Обработчики ввода данных пользователем
 async def handle_date_range_input(update, context, db_manager, user_input):
     """Обработка ввода диапазона дат"""

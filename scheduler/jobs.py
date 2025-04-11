@@ -154,5 +154,7 @@ class JobScheduler:
             result = digester.update_digests_for_date(today)
             
             logger.info(f"Задача обновления дайджестов завершена: {result}")
+            return result
         except Exception as e:
-            logger.error(f"Ошибка при выполнении задачи обновления дайджестов: {str(e)}")  
+            logger.error(f"Ошибка при выполнении задачи обновления дайджестов: {str(e)}")
+            return {"status": "error", "error": str(e)}  

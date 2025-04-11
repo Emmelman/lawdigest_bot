@@ -210,60 +210,101 @@ async def period_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
     
     # Шаг 1: Проверяем наличие существующего дайджеста за указанный период
     try:
+        existing_digests = None
+        # Для запроса "за сегодня" используем особую логику
         # Для запроса "за сегодня" используем особую логику
         if is_today_request:
-            # Ищем дайджест за сегодня
-            today_start = datetime.combine(today, time.min)
-            today_end = datetime.combine(today, time.max)
-            
-            existing_digests = db_manager.find_digests_by_parameters(
-                date_range_start=today_start,
-                date_range_end=today_end,
-                digest_type=digest_type if digest_type != "both" else None,
-                limit=1
+            # Ищем дайджест за сегодня с приоритетом дайджестов с is_today=True
+            today_digests = db_manager.find_digests_by_parameters(
+                is_today=True,
+                limit=10
             )
             
-            if existing_digests:
-                digest_id = existing_digests[0]['id']
-                digest = db_manager.get_digest_by_id_with_sections(digest_id)
+            if not today_digests:
+                # Если не нашли по is_today, ищем по диапазону дат
+                today_start = datetime.combine(today, time.min)
+                today_end = datetime.combine(today, time.max)
                 
-                if digest:
-                    # Проверяем время последнего обновления
-                    last_updated = digest.get("last_updated", today_start)
-                    current_time = datetime.now()
+                today_digests = db_manager.find_digests_by_parameters(
+                    date_range_start=today_start,
+                    date_range_end=today_end,
+                    digest_type=digest_type if digest_type != "both" else None,
+                    limit=10
+                )
+            
+            if today_digests:
+                # Группируем по типу и находим самые ранние
+                unique_digests = {}
+                for d in today_digests:
+                    d_type = d["digest_type"]
+                    if d_type not in unique_digests or d["id"] < unique_digests[d_type]["id"]:
+                        unique_digests[d_type] = d
+                
+                # Ищем соответствующий дайджест
+                target_digest = None
+                target_id = None
+                
+                if digest_type == "both":
+                    # Для типа "both" проверяем оба типа, начиная с "brief"
+                    if "brief" in unique_digests:
+                        target_digest = unique_digests["brief"]
+                        target_id = target_digest["id"]
+                    elif "detailed" in unique_digests:
+                        target_digest = unique_digests["detailed"]
+                        target_id = target_digest["id"]
+                elif digest_type in unique_digests:
+                    target_digest = unique_digests[digest_type]
+                    target_id = target_digest["id"]
+                
+                if target_digest and target_id:
+                    digest = db_manager.get_digest_by_id_with_sections(target_id)
                     
-                    # Если прошло менее 5 минут с последнего обновления, используем существующий дайджест
-                    if (current_time - last_updated).total_seconds() < 300:  # 5 минут
-                        await status_message.edit_text(
-                            f"{status_message.text}\n"
-                            f"✅ Найден актуальный дайджест {period_description}. Отправляю..."
-                        )
+                    if digest:
+                        # Проверяем время последнего обновления
+                        last_updated = digest.get("last_updated", today_start)
+                        current_time = datetime.now()
                         
-                        # Отправляем найденный дайджест
-                        safe_text = utils.clean_markdown_text(digest["text"])
-                        chunks = utils.split_text(safe_text)
-                        
-                        for i, chunk in enumerate(chunks):
-                            if i == 0:
-                                text_html = utils.convert_to_html(chunk)
-                                await update.message.reply_text(
-                                    f"{get_digest_type_name(digest['digest_type']).capitalize()} дайджест {period_description}:\n\n{text_html}",
-                                    parse_mode='HTML'
-                                )
-                            else:
-                                await update.message.reply_text(utils.convert_to_html(chunk), parse_mode='HTML')
-                        
-                        return
-                    else:
-                        # Обновляем дайджест с данными с момента последнего обновления
-                        await status_message.edit_text(
-                            f"{status_message.text}\n"
-                            f"🔄 Обновляю существующий дайджест за сегодня (последнее обновление: {last_updated.strftime('%H:%M')})..."
-                        )
-                        
-                        # Меняем начальную дату для сбора только новых данных
-                        start_date = last_updated
-                        force_update = True  # Обязательно обновляем
+                        # Если прошло менее 5 минут с последнего обновления, используем существующий дайджест
+                        if (current_time - last_updated).total_seconds() < 300:  # 5 минут
+                            await status_message.edit_text(
+                                f"{status_message.text}\n"
+                                f"✅ Найден актуальный дайджест {period_description}. Отправляю..."
+                            )
+                            
+                            # Отправляем найденный дайджест
+                            safe_text = utils.clean_markdown_text(digest["text"])
+                            chunks = utils.split_text(safe_text)
+                            
+                            for i, chunk in enumerate(chunks):
+                                if i == 0:
+                                    text_html = utils.convert_to_html(chunk)
+                                    await update.message.reply_text(
+                                        f"{get_digest_type_name(digest['digest_type']).capitalize()} дайджест {period_description}:\n\n{text_html}",
+                                        parse_mode='HTML'
+                                    )
+                                else:
+                                    await update.message.reply_text(utils.convert_to_html(chunk), parse_mode='HTML')
+                            
+                            return
+                        else:
+                            # Обновляем дайджест с данными с момента последнего обновления
+                            await status_message.edit_text(
+                                f"{status_message.text}\n"
+                                f"🔄 Обновляю существующий дайджест за сегодня (ID: {target_id}, последнее обновление: {last_updated.strftime('%H:%M')})..."
+                            )
+                            
+                            # Меняем начальную дату для сбора только новых данных
+                            start_date = last_updated
+                            force_update = True  # Обязательно обновляем
+                            
+                            # Важно: сохраняем ID дайджеста для последующего обновления
+                            digest_id = target_id
+                else:
+                    # Если дайджест не найден, будем создавать новый
+                    await status_message.edit_text(
+                        f"{status_message.text}\n"
+                        f"🆕 Создаю новый дайджест {period_description}..."
+                    )
             else:
                 # Если дайджест не найден, будем создавать новый
                 await status_message.edit_text(

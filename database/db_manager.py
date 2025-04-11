@@ -821,23 +821,13 @@ class DatabaseManager:
             session.close()
 
     def find_digests_by_parameters(self, digest_type=None, date=None, 
-                                date_range_start=None, date_range_end=None,
-                                focus_category=None, is_today=None, limit=5):
+                           date_range_start=None, date_range_end=None,
+                           focus_category=None, is_today=None, limit=5):
         """
-        Поиск дайджестов по параметрам
+        Поиск дайджестов по параметрам с улучшенной обработкой типов даты
+        """
+        from datetime import datetime, time
         
-        Args:
-            digest_type (str): Тип дайджеста (brief/detailed)
-            date (datetime): Конкретная дата дайджеста
-            date_range_start (datetime): Начальная дата диапазона
-            date_range_end (datetime): Конечная дата диапазона
-            focus_category (str): Фокусная категория
-            is_today (bool): Признак дайджеста за текущий день
-            limit (int): Максимальное количество результатов
-            
-        Returns:
-            list: Список дайджестов, соответствующих параметрам
-        """
         session = self.Session()
         try:
             query = session.query(Digest)
@@ -845,11 +835,31 @@ class DatabaseManager:
             if digest_type:
                 query = query.filter(Digest.digest_type == digest_type)
             
+            # Обновите проверку даты (примерно строка 1520-1540)
             if date:
-                # Поиск дайджестов на конкретную дату
-                start_date = datetime.combine(date.date(), time(0, 0, 0))
-                end_date = datetime.combine(date.date(), time(23, 59, 59))
-                query = query.filter(Digest.date >= start_date, Digest.date <= end_date)
+                # Корректная обработка объектов date и datetime
+                try:
+                    # Если это date, а не datetime, преобразуем в datetime
+                    if hasattr(date, 'date') and callable(getattr(date, 'date')):
+                        # Это datetime объект
+                        start_date = datetime.combine(date.date(), time(0, 0, 0))
+                        end_date = datetime.combine(date.date(), time(23, 59, 59))
+                    else:
+                        # Это date объект
+                        start_date = datetime.combine(date, time(0, 0, 0))
+                        end_date = datetime.combine(date, time(23, 59, 59))
+                    
+                    # Ищем все дайжесты, которые попадают в этот день
+                    query = query.filter(
+                        or_(
+                            and_(Digest.date >= start_date, Digest.date <= end_date),
+                            and_(Digest.date_range_start <= end_date, Digest.date_range_end >= start_date)
+                        )
+                    )
+                    
+                    logger.info(f"Поиск дайджестов за дату {date}")
+                except Exception as e:
+                    logger.error(f"Ошибка при обработке параметра date: {str(e)}")
             
             if date_range_start and date_range_end:
                 # Поиск дайджестов, которые охватывают указанный период
@@ -887,8 +897,9 @@ class DatabaseManager:
                     end_of_today = datetime.combine(today, time(23, 59, 59))
                     query = query.filter(Digest.date >= start_of_today, Digest.date <= end_of_today)
             
-            # Сортируем по дате создания (сначала новые)
-            digests = query.order_by(Digest.created_at.desc()).limit(limit).all()
+            # Сортируем сначала по типу, потом по дате создания (сначала самые ранние)
+            # Это поможет избежать дублей за один день
+            digests = query.order_by(Digest.digest_type, Digest.created_at).limit(limit).all()
             
             results = []
             for digest in digests:
@@ -916,6 +927,7 @@ class DatabaseManager:
             return []
         finally:
             session.close()
+
     def get_digests_containing_date(self, date):
         """
         Находит все дайджесты, которые включают указанную дату

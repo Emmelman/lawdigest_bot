@@ -15,7 +15,7 @@ from telegram.ext import (
 from config.settings import TELEGRAM_BOT_TOKEN
 from telegram_bot.handlers import (
     start_command, help_command, digest_command, digest_detailed_command,
-    period_command, category_command, list_digests_command,
+    period_command, category_command, list_digests_command, category_selection_command,
     message_handler, button_callback
 )
 from llm.gemma_model import GemmaLLM
@@ -79,13 +79,13 @@ class TelegramBot:
         
         # Команды выбора категории
         self.application.add_handler(
-            CommandHandler("category", lambda update, context: 
-                        category_command(update, context, self.db_manager))
+        CommandHandler("category", lambda update, context: 
+                        category_selection_command(update, context, self.db_manager))
         )
-        
+
         self.application.add_handler(
             CommandHandler("cat", lambda update, context: 
-                        category_command(update, context, self.db_manager))
+                        category_selection_command(update, context, self.db_manager))
         )
         
         # Список дайджестов

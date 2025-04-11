@@ -617,8 +617,41 @@ class DigesterAgent:
                         f"с {start_date.strftime('%Y-%m-%d %H:%M')} по {end_date.strftime('%Y-%m-%d %H:%M')}")
         
         logger.info(f"Создание дайджеста за период с {start_date.strftime('%Y-%m-%d')} по {end_date.strftime('%Y-%m-%d')}, тип: {digest_type}")
-        
-        
+        # Проверяем существующие дайжесты для сегодняшнего дня
+        update_existing_by_id = False
+        if end_date.date() == datetime.now().date():
+            # Ищем дайджесты за сегодня
+            today_digests = self.db_manager.find_digests_by_parameters(
+                date=end_date.date(),
+                is_today=True,
+                limit=10
+            )
+            
+            # Группируем по типу и находим самые ранние
+            unique_digests = {}
+            for d in today_digests:
+                d_type = d["digest_type"]
+                if d_type not in unique_digests or d["id"] < unique_digests[d_type]["id"]:
+                    unique_digests[d_type] = d
+            
+            # Если у нас есть совпадение по типу, устанавливаем digest_id
+            if digest_type in unique_digests and unique_digests[digest_type]["id"]:
+                digest_id = unique_digests[digest_type]["id"]
+                update_existing = True
+                update_existing_by_id = True
+                logger.info(f"Найден существующий дайджест за сегодня (ID: {digest_id}, тип: {digest_type}). Будет обновлен.")
+        # Если мы нашли существующий дайджест и установили update_existing_by_id
+        if update_existing_by_id and digest_id:
+            logger.info(f"Будет обновлен существующий дайджест (ID: {digest_id})")
+        else:
+            # Проверяем существующие дайжесты с помощью специального метода
+            digest_to_update = None
+            if update_existing and digest_id is None:  # Только если ID еще не найден
+                digest_to_update = self.get_digest_to_update(end_date, digest_type)
+                if digest_to_update:
+                    digest_id = digest_to_update['id']
+                    logger.info(f"Найден существующий дайджест для обновления (ID: {digest_id}, тип: {digest_type})")    
+            # Здесь ничего больше делать не нужно, digest_id уже установлен
         # БЛОК 3: ПОЛУЧЕНИЕ СООБЩЕНИЙ - УСТРАНЕНА ДУБЛИКАЦИЯ ВЫЗОВА
         filter_result = self.db_manager.get_filtered_messages(
             start_date=start_date,
@@ -774,6 +807,9 @@ class DigesterAgent:
                 
                 results["brief_digest_text"] = brief_text
                 
+                today = datetime.now().date() 
+                is_today_digest = end_date.date() == today
+                
                 # Сохраняем краткий дайджест в БД с параметрами
                 try:
                     brief_result = self.db_manager.save_digest_with_parameters(
@@ -786,7 +822,8 @@ class DigesterAgent:
                         focus_category=focus_category,
                         channels_filter=channels,
                         keywords_filter=keywords,
-                        digest_id=digest_id if digest_type == "brief" else None
+                        digest_id=digest_id if digest_type == "brief" else None,
+                        is_today=is_today_digest
                     )
                     results["brief_digest_id"] = brief_result["id"]
                     logger.info(f"Краткий дайджест успешно создан и сохранен (ID: {brief_result['id']})")
@@ -826,7 +863,10 @@ class DigesterAgent:
                     detailed_text += "\n\n[Просмотреть краткий дайджест](/digest/brief)\n"
                 
                 results["detailed_digest_text"] = detailed_text
-                
+               
+                today = datetime.now().date() 
+                is_today_digest = end_date.date() == today
+               
                 # Сохраняем подробный дайджест в БД с параметрами
                 try:
                     detailed_result = self.db_manager.save_digest_with_parameters(
@@ -839,7 +879,8 @@ class DigesterAgent:
                         focus_category=focus_category,
                         channels_filter=channels,
                         keywords_filter=keywords,
-                        digest_id=digest_id if digest_type == "detailed" else None
+                        digest_id=digest_id if digest_type == "detailed" else None,
+                        is_today=is_today_digest
                     )
                     results["detailed_digest_id"] = detailed_result["id"]
                     logger.info(f"Подробный дайджест успешно создан и сохранен (ID: {detailed_result['id']})")
@@ -851,7 +892,41 @@ class DigesterAgent:
                 results["detailed_error"] = str(e)
         
         return results
-    
+    def get_digest_to_update(self, date, digest_type):
+        """
+        Находит дайджест для обновления на указанную дату и указанного типа
+        
+        Args:
+            date (datetime): Дата дайджеста
+            digest_type (str): Тип дайджеста
+            
+        Returns:
+            dict: Информация о дайджесте или None
+        """
+        # Проверяем, сегодняшний ли это дайджест
+        today = datetime.now().date()
+        is_today = date.date() == today if hasattr(date, 'date') else date == today
+        
+        if is_today:
+            # Для сегодняшнего дня ищем с флагом is_today
+            digests = self.db_manager.find_digests_by_parameters(
+                is_today=True,
+                digest_type=digest_type,
+                limit=5
+            )
+        else:
+            # Для других дней ищем по дате
+            digests = self.db_manager.find_digests_by_parameters(
+                date=date,
+                digest_type=digest_type,
+                limit=5
+            )
+        
+        if not digests:
+            return None
+        
+        # Возвращаем самый ранний (с наименьшим ID)
+        return min(digests, key=lambda x: x['id'])
     def create_task(self):
         """
         Создание задачи для агента
@@ -870,18 +945,41 @@ class DigesterAgent:
         
         Args:
             date (datetime): Дата для обновления дайджестов
-            
+                
         Returns:
             dict: Результаты обновления
         """
         logger.info(f"Обновление дайджестов, содержащих дату {date.strftime('%Y-%m-%d')}")
         
-        # Получаем все дайджесты, включающие эту дату
+        # Найти все дайжесты, которые содержат данную дату
         digests = self.db_manager.get_digests_containing_date(date)
+        
+        if not digests:
+            # Для текущего дня проверяем дайджесты с флагом is_today
+            today = datetime.now().date()
+            if date.date() == today:
+                today_digests = self.db_manager.find_digests_by_parameters(
+                    is_today=True,
+                    limit=10
+                )
+                if today_digests:
+                    digests = today_digests
+                    logger.info(f"Найдено {len(today_digests)} дайджестов за сегодня с флагом is_today=True")
         
         if not digests:
             logger.info(f"Дайджесты, содержащие дату {date.strftime('%Y-%m-%d')}, не найдены")
             return {"status": "no_digests", "date": date.strftime('%Y-%m-%d')}
+        
+        # Группируем дайджесты по типу и оставляем только самые ранние для каждого типа
+        # Это предотвратит обновление дублей
+        unique_digests = {}
+        for digest in digests:
+            digest_type = digest["digest_type"]
+            if digest_type not in unique_digests or digest["id"] < unique_digests[digest_type]["id"]:
+                unique_digests[digest_type] = digest
+        
+        digests = list(unique_digests.values())
+        logger.info(f"Уникальных дайджестов для обновления: {len(digests)}")
         
         results = {"updated_digests": []}
         
