@@ -630,6 +630,8 @@ async def handle_digest_selection(update: Update, context: ContextTypes.DEFAULT_
         else:
             await query.message.reply_text("Дайджест за сегодня не найден.")
 
+# В файле telegram_bot/handlers.py 
+
 async def show_digest_categories(message, digest_id, db_manager):
     """Показывает категории из выбранного дайджеста"""
     digest = db_manager.get_digest_by_id_with_sections(digest_id)
@@ -647,6 +649,7 @@ async def show_digest_categories(message, digest_id, db_manager):
     keyboard = []
     for category in categories:
         icon = get_category_icon(category)
+        # Используем формат cat_digest_id_category для передачи ID дайджеста
         keyboard.append([InlineKeyboardButton(f"{icon} {category}", callback_data=f"cat_{digest_id}_{category}")])
     
     # Добавляем кнопку "Весь дайджест"
@@ -657,8 +660,11 @@ async def show_digest_categories(message, digest_id, db_manager):
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
+    digest_date = digest['date'].strftime('%d.%m.%Y')
+    digest_type = "краткий" if digest['digest_type'] == "brief" else "подробный"
+    
     await message.reply_text(
-        f"Дайджест за {digest['date'].strftime('%d.%m.%Y')} ({digest['digest_type']}).\n"
+        f"Дайджест за {digest_date} ({digest_type}).\n"
         f"Выберите категорию для просмотра:",
         reply_markup=reply_markup
     )
@@ -827,6 +833,8 @@ async def handle_channel_period_input(update, context, db_manager, user_input):
         )
 
 # Обработчик кнопок и генерация дайджеста (см. ранее определенную функцию handle_digest_generation)
+# В файле telegram_bot/handlers.py нужно обновить функцию button_callback
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, db_manager):
     """Обработчик нажатий на кнопки"""
     query = update.callback_query
@@ -841,9 +849,120 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, db
             logger.error(f"Ошибка при просмотре дайджеста: {str(e)}")
             await query.message.reply_text(f"Произошла ошибка при загрузке дайджеста: {str(e)}")
     
-    # Обработка выбора категории
+    # Добавляем обработку select_digest_X для команды /cat
+    elif query.data.startswith("select_digest_"):
+        try:
+            digest_id = int(query.data.replace("select_digest_", ""))
+            await show_digest_categories(query.message, digest_id, db_manager)
+        except Exception as e:
+            logger.error(f"Ошибка при выборе дайджеста: {str(e)}")
+            await query.message.reply_text(f"Произошла ошибка при выборе дайджеста: {str(e)}")
+    
+    # Добавляем обработку cat_X_Y для просмотра категории дайджеста
     elif query.data.startswith("cat_"):
-        # Формат: cat_[тип]_[категория]
+        try:
+            # Формат: cat_id_category
+            parts = query.data.split("_", 2)
+            if len(parts) == 3:
+                digest_id = int(parts[1])
+                category = parts[2]
+                
+                # Получаем дайджест по ID
+                digest = db_manager.get_digest_by_id_with_sections(digest_id)
+                
+                if not digest:
+                    await query.message.reply_text(f"Дайджест не найден.")
+                    return
+                
+                # Ищем секцию для указанной категории
+                section = next((s for s in digest["sections"] if s["category"] == category), None)
+                
+                if not section:
+                    await query.message.reply_text(f"Категория '{category}' не найдена в дайджесте.")
+                    return
+                
+                # Отправляем секцию
+                safe_text = utils.clean_markdown_text(section["text"])
+                chunks = utils.split_text(safe_text)
+                
+                header = f"Дайджест от {digest['date'].strftime('%d.%m.%Y')} - категория: {category}"
+                
+                for i, chunk in enumerate(chunks):
+                    if i == 0:
+                        text_html = utils.convert_to_html(chunk)
+                        await query.message.reply_text(f"{header}\n\n{text_html}", parse_mode='HTML')
+                    else:
+                        await query.message.reply_text(utils.convert_to_html(chunk), parse_mode='HTML')
+        except Exception as e:
+            logger.error(f"Ошибка при показе категории: {str(e)}")
+            await query.message.reply_text(f"Произошла ошибка при показе категории: {str(e)}")
+    
+    # Обработка для возврата к списку дайджестов
+    elif query.data == "back_to_digest_list":
+        try:
+        # Получаем последние 10 дайджестов
+            digests = db_manager.find_digests_by_parameters(limit=10)
+        
+            if not digests:
+                await query.message.reply_text("Дайджесты еще не сформированы.")
+                return
+            
+            keyboard = []
+            for digest in digests:
+                # Формируем описание дайджеста
+                if digest.get("date_range_start") and digest.get("date_range_end"):
+                    days_diff = (digest["date_range_end"] - digest["date_range_start"]).days
+                    if days_diff > 0:
+                        start_date = digest["date_range_start"].strftime("%d.%m.%Y")
+                        end_date = digest["date_range_end"].strftime("%d.%m.%Y")
+                        date_text = f"{start_date} - {end_date} ({days_diff+1} дн.)"
+                    else:
+                        date_text = digest["date"].strftime("%d.%m.%Y")
+                else:
+                    date_text = digest["date"].strftime("%d.%m.%Y")
+                
+                # Добавляем информацию о фокусе, если есть
+                focus_text = ""
+                if digest.get("focus_category"):
+                    focus_text = f" - {digest['focus_category']}"
+                
+                # Добавляем время создания
+                created_at = ""
+                if digest.get("created_at"):
+                    created_at = f" ({digest['created_at'].strftime('%H:%M')})"
+                
+                button_text = f"{date_text}{focus_text} ({digest['digest_type']}){created_at}"
+                keyboard.append([
+                    InlineKeyboardButton(button_text, callback_data=f"select_digest_{digest['id']}")
+                ])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            # Используем query.message.reply_text вместо update.message.reply_text
+            await query.message.reply_text(
+                "Выберите дайджест для просмотра:", 
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при отображении списка дайджестов: {str(e)}")
+            await query.message.reply_text(f"Произошла ошибка при загрузке списка дайджестов: {str(e)}")
+        
+    # Обработка для просмотра полного дайджеста
+    elif query.data.startswith("full_digest_"):
+        try:
+            digest_id = int(query.data.replace("full_digest_", ""))
+            await show_digest_by_id(query.message, digest_id, db_manager)
+        except Exception as e:
+            logger.error(f"Ошибка при просмотре полного дайджеста: {str(e)}")
+            await query.message.reply_text(f"Произошла ошибка при загрузке дайджеста: {str(e)}")
+    
+    # Обработка для выбора сегодняшнего дайджеста
+    elif query.data == "select_today_digest":
+        await handle_digest_selection(update, context, db_manager, query.data)
+        
+    # Обработка выбора категории (старый формат)
+    elif query.data.startswith("cat_brief_") or query.data.startswith("cat_detailed_"):
+        # ... сохраняем существующую обработку ...
         parts = query.data.split("_", 2)
         if len(parts) == 3:
             digest_type = parts[1]  # brief или detailed
@@ -885,28 +1004,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, db
             for chunk in chunks:
                 text_html = utils.convert_to_html(chunk)
                 await query.message.reply_text(text_html, parse_mode='HTML')
-    
-    # Обработка других типов кнопок
-    elif query.data.startswith("gen_digest_"):
-        # Перенаправляем на команду /period с соответствующими параметрами
-        if query.data == "gen_digest_today":
-            # Генерация дайджеста за сегодня
-            await query.message.reply_text("Использую команду /period сегодня")
-            context.args = ["сегодня"]
-            await period_command(update, context, db_manager)
-        elif query.data == "gen_digest_yesterday":
-            # Генерация дайджеста за вчера
-            await query.message.reply_text("Использую команду /period вчера")
-            context.args = ["вчера"]
-            await period_command(update, context, db_manager)
-        else:
-            # Для остальных запросов на генерацию
-            await query.message.reply_text(
-                "Эта функция теперь доступна через команду /period. Примеры:\n"
-                "/period сегодня\n"
-                "/period вчера\n"
-                "/period 2025-04-01 2025-04-10 detailed"
-            )
     else:
         await query.message.reply_text(f"Неизвестная команда: {query.data}")
 

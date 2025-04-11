@@ -1163,4 +1163,79 @@ class DatabaseManager:
             logger.error(f"Ошибка при получении информации о последней генерации дайджеста: {str(e)}")
             return None
         finally:
-            session.close()                   
+            session.close()      
+    # В database/db_manager.py
+
+# В файле database/db_manager.py добавим новый метод для поиска дайджестов за сегодня
+
+def find_todays_digests(self, digest_type=None):
+    """
+    Находит все дайджесты за сегодня
+    
+    Args:
+        digest_type (str, optional): Тип дайджеста для фильтрации
+        
+    Returns:
+        list: Список дайджестов
+    """
+    session = self.Session()
+    try:
+        today = datetime.now().date()
+        start_of_today = datetime.combine(today, time(0, 0, 0))
+        end_of_today = datetime.combine(today, time(23, 59, 59))
+        
+        # Создаем базовый запрос
+        query = session.query(Digest).filter(
+            Digest.date >= start_of_today,
+            Digest.date <= end_of_today
+        )
+        
+        # Проверяем, есть ли поле is_today
+        if hasattr(Digest, 'is_today'):
+            # Если поле есть, сначала пробуем найти по флагу
+            flagged_query = session.query(Digest).filter(Digest.is_today == True)
+            if digest_type:
+                flagged_query = flagged_query.filter(Digest.digest_type == digest_type)
+            
+            flagged_digests = flagged_query.all()
+            if flagged_digests:
+                # Если нашли дайджесты с флагом is_today, возвращаем их
+                result = []
+                for digest in flagged_digests:
+                    result.append({
+                        "id": digest.id,
+                        "date": digest.date,
+                        "digest_type": digest.digest_type,
+                        "date_range_start": digest.date_range_start,
+                        "date_range_end": digest.date_range_end,
+                        "focus_category": digest.focus_category,
+                        "is_today": True
+                    })
+                return result
+        
+        # Если не нашли по флагу или поля нет, фильтруем по дате
+        if digest_type:
+            query = query.filter(Digest.digest_type == digest_type)
+        
+        # Получаем результаты
+        digests = query.order_by(Digest.id).all()
+        
+        # Преобразуем в список словарей
+        result = []
+        for digest in digests:
+            result.append({
+                "id": digest.id,
+                "date": digest.date,
+                "digest_type": digest.digest_type,
+                "date_range_start": digest.date_range_start,
+                "date_range_end": digest.date_range_end,
+                "focus_category": digest.focus_category,
+                "is_today": hasattr(digest, 'is_today') and digest.is_today
+            })
+        
+        return result
+    except Exception as e:
+        logger.error(f"Ошибка при поиске сегодняшних дайджестов: {str(e)}")
+        return []
+    finally:
+        session.close()                    

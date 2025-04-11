@@ -357,12 +357,13 @@ async def period_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
             f"{status_message.text}\n"
             f"Собираю данные {period_description}... 📥"
         )
-        
-        # Запускаем сбор данных
+        days_back_value = (end_date.date() - start_date.date()).days + 1
+         # Запускаем сбор данных с принудительным обновлением
         collect_result = await collector.collect_data(
+            days_back=days_back_value,
+            force_update=True,  # Принудительно обновляем данные
             start_date=start_date,
-            end_date=end_date,
-            force_update=force_update
+            end_date=end_date
         )
         
         total_messages = collect_result.get("total_new_messages", 0)
