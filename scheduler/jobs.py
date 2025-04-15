@@ -95,16 +95,17 @@ class JobScheduler:
         except Exception as e:
             logger.error(f"Ошибка при выполнении задач Crew: {str(e)}")
     
+    # В scheduler/jobs.py
+
     def setup_jobs(self):
         """Настройка расписания задач"""
-        # Задача сбора данных (каждые N минут)
+        # Существующие задачи
         self.scheduler.add_job(
             self.collect_data_job,
             IntervalTrigger(minutes=COLLECT_INTERVAL_MINUTES),
             id='collect_data'
         )
         
-        # Задача анализа сообщений (каждые N минут)
         self.scheduler.add_job(
             self.analyze_messages_job,
             IntervalTrigger(minutes=ANALYZE_INTERVAL_MINUTES),
@@ -126,7 +127,29 @@ class JobScheduler:
             id='update_digests'
         )
         
+        # Добавляем задачу обновления флагов is_today (каждый день в полночь + 1 минуту)
+        self.scheduler.add_job(
+            self.update_today_flags_job,
+            CronTrigger(hour=0, minute=1),  # В 00:01 каждый день
+            id='update_today_flags'
+        )
+        
+        # Также выполняем обновление флагов при запуске
+        self.update_today_flags_job()
+        
         logger.info("Задачи настроены")
+
+    def update_today_flags_job(self):
+        """Задача обновления флагов is_today"""
+        logger.info("Запуск задачи обновления флагов is_today")
+        try:
+            result = self.db_manager.update_today_flags()
+            if "error" in result:
+                logger.error(f"Задача обновления флагов is_today завершилась с ошибкой: {result['error']}")
+            else:
+                logger.info(f"Задача обновления флагов is_today успешно выполнена. Обновлено: {result['updated']}")
+        except Exception as e:
+            logger.error(f"Ошибка при выполнении задачи обновления флагов is_today: {str(e)}")
     
     def start(self):
         """Запуск планировщика"""

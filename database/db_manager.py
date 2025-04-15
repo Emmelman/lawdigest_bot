@@ -10,28 +10,29 @@ from sqlalchemy.orm import sessionmaker, scoped_session
 from datetime import datetime, timedelta
 import json
 from sqlalchemy import or_, and_
+from sqlalchemy import extract
 from .models import Base, Message, Digest, DigestSection, DigestGeneration, init_db
 logger = logging.getLogger(__name__)
 
 class DatabaseManager:
     """Менеджер для работы с базой данных"""
     
+    # В database/db_manager.py
+
     def __init__(self, db_url):
         """
-        Инициализация менеджера БД
-        
-        Args:
-            db_url (str): URL для подключения к БД (например, sqlite:///lawdigest.db)
+        Инициализация менеджера БД с улучшенной обработкой блокировок
         """
-        # Используем SQLite с дополнительными параметрами для избежания блокировок
+        # Добавляем параметры для улучшения работы с SQLite
         if 'sqlite' in db_url.lower():
-            # Добавляем параметр timeout для ожидания при блокировке
+            # Увеличиваем таймаут ожидания и добавляем параметры для оптимизации конкурентного доступа
             if '?' not in db_url:
-                db_url += '?timeout=30'
+                db_url += '?timeout=60&busy_timeout=60000&journal_mode=WAL&synchronous=NORMAL'
             else:
-                db_url += '&timeout=30'
+                db_url += '&timeout=60&busy_timeout=60000&journal_mode=WAL&synchronous=NORMAL'
         
         init_db(db_url) 
+        
         # Создаем движок с улучшенными параметрами для многопоточного доступа
         self.engine = create_engine(
             db_url,
@@ -40,7 +41,7 @@ class DatabaseManager:
             },
             pool_size=10,  # Размер пула соединений
             max_overflow=20,  # Максимальное количество дополнительных соединений
-            pool_timeout=30,  # Время ожидания соединения из пула
+            pool_timeout=60,  # Увеличиваем время ожидания соединения из пула
             pool_recycle=1800,  # Переиспользовать соединения не старше 30 минут
             pool_pre_ping=True  # Проверять соединение перед использованием
         )
@@ -49,47 +50,60 @@ class DatabaseManager:
         self.Session = scoped_session(self.session_factory)
 
     # Добавляем декоратор для автоматической обработки транзакций и повторных попыток
-    def with_retry(max_attempts=3, delay=0.5):
+    # Улучшенный декоратор для повторных попыток
+    def with_retry(max_attempts=5, delay=1.0, backoff_factor=2.0, error_types=(Exception,)):
         """
-        Декоратор для повторных попыток выполнения операций с базой данных
-        при возникновении конкурентных конфликтов.
+        Усовершенствованный декоратор для повторных попыток выполнения операций с БД
+        с экспоненциальной задержкой.
         
         Args:
             max_attempts (int): Максимальное количество попыток
-            delay (float): Задержка между попытками в секундах
+            delay (float): Начальная задержка между попытками в секундах
+            backoff_factor (float): Множитель для увеличения задержки с каждой попыткой
+            error_types (tuple): Типы ошибок, при которых выполнять повторные попытки
         """
         def decorator(func):
             @functools.wraps(func)
             def wrapper(self, *args, **kwargs):
                 attempt = 0
+                current_delay = delay
                 last_error = None
                 
                 while attempt < max_attempts:
                     try:
                         return func(self, *args, **kwargs)
-                    except Exception as e:
+                    except error_types as e:
                         # Определяем, связана ли ошибка с блокировкой БД
                         is_db_lock_error = (
-                            isinstance(e, sqlalchemy.exc.OperationalError) and
-                            "database is locked" in str(e).lower()
+                            isinstance(e, sqlalchemy.exc.OperationalError) and 
+                            ("database is locked" in str(e).lower() or 
+                            "database disk image is malformed" in str(e).lower() or
+                            "busy" in str(e).lower())
                         )
                         
                         attempt += 1
                         last_error = e
                         
-                        # Для ошибок блокировки используем экспоненциальную задержку
-                        if is_db_lock_error and attempt < max_attempts:
-                            retry_delay = delay * (2 ** (attempt - 1))  # Экспоненциальная задержка
-                            logger.warning(f"База данных заблокирована, повторная попытка {attempt}/{max_attempts} через {retry_delay:.2f}с")
-                            time.sleep(retry_delay)
+                        if attempt < max_attempts:
+                            # Для ошибок блокировки используем экспоненциальную задержку
+                            if is_db_lock_error:
+                                retry_delay = current_delay
+                                current_delay *= backoff_factor  # Увеличиваем задержку для следующей попытки
+                                
+                                logger.warning(f"База данных заблокирована, повторная попытка {attempt}/{max_attempts} через {retry_delay:.2f}с")
+                                time.sleep(retry_delay)
+                            else:
+                                # Если это не ошибка блокировки, используем постоянную задержку
+                                logger.warning(f"Ошибка при выполнении операции с БД: {str(e)}, повторная попытка {attempt}/{max_attempts} через {delay}с")
+                                time.sleep(delay)
                         else:
-                            # Если это не ошибка блокировки или последняя попытка - прерываем
+                            # Если это последняя попытка - прерываем
                             break
                 
                 # Если все попытки не удались, логируем и выбрасываем исключение
                 logger.error(f"Не удалось выполнить операцию с БД после {max_attempts} попыток: {str(last_error)}")
                 raise last_error
-            
+                
             return wrapper
         return decorator
     
@@ -700,38 +714,70 @@ class DatabaseManager:
         finally:
             session.close()
 
+    @with_retry(max_attempts=5, delay=1.0)
     def save_digest_with_parameters(self, date, text, sections, digest_type="brief", 
-                              date_range_start=None, date_range_end=None, 
-                              focus_category=None, channels_filter=None, 
-                              keywords_filter=None, digest_id=None,
-                              is_today=False, last_updated=None):
+                            date_range_start=None, date_range_end=None, 
+                            focus_category=None, channels_filter=None, 
+                            keywords_filter=None, digest_id=None,
+                            is_today=False, last_updated=None):
         """
-        Сохранение дайджеста с расширенными параметрами
-        
-        Args:
-            date (datetime): Дата дайджеста
-            text (str): Текст дайджеста
-            sections (dict): Словарь секций
-            digest_type (str): Тип дайджеста
-            date_range_start (datetime): Начальная дата диапазона
-            date_range_end (datetime): Конечная дата диапазона
-            focus_category (str): Фокусная категория
-            channels_filter (list): Список каналов для фильтрации
-            keywords_filter (list): Список ключевых слов для фильтрации
-            digest_id (int): ID существующего дайджеста для обновления
-            is_today (bool): Признак дайджеста за текущий день
-            last_updated (datetime): Время последнего обновления
+        Сохранение дайджеста с расширенными параметрами и улучшенной обработкой ошибок
         """
         session = self.Session()
         try:
+            # Подготавливаем данные JSON полей
+            channels_json = None
+            keywords_json = None
+            
+            if channels_filter is not None:
+                try:
+                    # Проверяем, не является ли значение уже строкой JSON
+                    if isinstance(channels_filter, str):
+                        # Пробуем распарсить и снова сериализовать для проверки
+                        json.loads(channels_filter)
+                        channels_json = channels_filter
+                    else:
+                        channels_json = json.dumps(channels_filter)
+                except (TypeError, json.JSONDecodeError):
+                    # Если не получается распарсить как JSON, сохраняем как есть
+                    channels_json = json.dumps(None)
+            
+            if keywords_filter is not None:
+                try:
+                    if isinstance(keywords_filter, str):
+                        json.loads(keywords_filter)
+                        keywords_json = keywords_filter
+                    else:
+                        keywords_json = json.dumps(keywords_filter)
+                except (TypeError, json.JSONDecodeError):
+                    keywords_json = json.dumps(None)
+            
+            # Устанавливаем время последнего обновления, если не указано
+            if last_updated is None:
+                last_updated = datetime.now()
+                
             if digest_id:
-                # Обновляем существующий дайджест
-                digest = session.query(Digest).filter_by(id=digest_id).first()
+                # Поиск существующего дайджеста с обработкой блокировок
+                digest = None
+                retry_count = 0
+                max_retries = 3
+                
+                while retry_count < max_retries:
+                    try:
+                        digest = session.query(Digest).filter_by(id=digest_id).with_for_update().first()
+                        break
+                    except Exception as e:
+                        retry_count += 1
+                        if retry_count >= max_retries:
+                            raise
+                        logger.warning(f"Не удалось получить блокировку на дайджест ID={digest_id}, попытка {retry_count}/{max_retries}")
+                        time.sleep(1)
+                
                 if digest:
                     # Обновляем поля дайджеста
                     digest.text = text
                     digest.date = date
-                    digest.last_updated = last_updated or datetime.now()
+                    digest.last_updated = last_updated
                     
                     # Обновляем дополнительные параметры, если они предоставлены
                     if date_range_start is not None:
@@ -740,10 +786,10 @@ class DatabaseManager:
                         digest.date_range_end = date_range_end
                     if focus_category is not None:
                         digest.focus_category = focus_category
-                    if channels_filter is not None:
-                        digest.channels_filter = json.dumps(channels_filter) if channels_filter else None
-                    if keywords_filter is not None:
-                        digest.keywords_filter = json.dumps(keywords_filter) if keywords_filter else None
+                    if channels_json is not None:
+                        digest.channels_filter = channels_json
+                    if keywords_json is not None:
+                        digest.keywords_filter = keywords_json
                     
                     # Добавляем признак дайджеста за текущий день
                     if hasattr(digest, 'is_today'):
@@ -760,9 +806,9 @@ class DatabaseManager:
                         date_range_start=date_range_start,
                         date_range_end=date_range_end,
                         focus_category=focus_category,
-                        channels_filter=json.dumps(channels_filter) if channels_filter else None,
-                        keywords_filter=json.dumps(keywords_filter) if keywords_filter else None,
-                        last_updated=last_updated or datetime.now(),
+                        channels_filter=channels_json,
+                        keywords_filter=keywords_json,
+                        last_updated=last_updated,
                         is_today=is_today
                     )
                     session.add(digest)
@@ -775,31 +821,45 @@ class DatabaseManager:
                     date_range_start=date_range_start,
                     date_range_end=date_range_end,
                     focus_category=focus_category,
-                    channels_filter=json.dumps(channels_filter) if channels_filter else None,
-                    keywords_filter=json.dumps(keywords_filter) if keywords_filter else None,
-                    last_updated=last_updated or datetime.now(),
+                    channels_filter=channels_json,
+                    keywords_filter=keywords_json,
+                    last_updated=last_updated,
                     is_today=is_today
                 )
                 session.add(digest)
             
-            session.flush()  # Получаем ID дайджеста
+            # Применяем изменения и получаем ID
+            session.flush()
             
-            # Добавляем секции
+            # Добавляем секции (с обработкой блокировок)
             sections_data = []
             for category, section_text in sections.items():
-                section = DigestSection(
-                    digest_id=digest.id,
-                    category=category,
-                    text=section_text
-                )
-                session.add(section)
-                sections_data.append({
-                    "category": category,
-                    "text": section_text
-                })
+                try:
+                    section = DigestSection(
+                        digest_id=digest.id,
+                        category=category,
+                        text=section_text
+                    )
+                    session.add(section)
+                    sections_data.append({
+                        "category": category,
+                        "text": section_text
+                    })
+                except Exception as e:
+                    logger.error(f"Ошибка при добавлении секции '{category}': {str(e)}")
             
-            # Фиксируем изменения
-            session.commit()
+            # Фиксируем изменения с повторными попытками при ошибках
+            retry_commit = 0
+            while retry_commit < 3:
+                try:
+                    session.commit()
+                    break
+                except Exception as e:
+                    retry_commit += 1
+                    if retry_commit >= 3:
+                        raise
+                    logger.warning(f"Ошибка при фиксации изменений: {str(e)}, повторная попытка {retry_commit}/3")
+                    time.sleep(retry_commit)
             
             # Создаем результат для возврата
             result = {
@@ -808,7 +868,7 @@ class DatabaseManager:
                 "digest_type": digest_type,
                 "sections": sections_data,
                 "is_today": is_today,
-                "last_updated": last_updated or datetime.now()
+                "last_updated": last_updated
             }
             
             logger.info(f"Сохранен дайджест типа '{digest_type}' за {date.strftime('%Y-%m-%d')}, обновлен: {digest_id is not None}")
@@ -819,7 +879,7 @@ class DatabaseManager:
             raise
         finally:
             session.close()
-
+              
     def find_digests_by_parameters(self, digest_type=None, date=None, 
                            date_range_start=None, date_range_end=None,
                            focus_category=None, is_today=None, limit=5):
@@ -1164,7 +1224,73 @@ class DatabaseManager:
             return None
         finally:
             session.close()      
-    # В database/db_manager.py
+    # В начале файла database/db_manager.py добавьте импорт:
+
+
+    @with_retry(max_attempts=5, delay=1.0)
+    def update_today_flags(self):
+        """Обновляет флаги is_today в соответствии с текущей датой"""
+        session = self.Session()
+        try:
+            today = datetime.now().date()
+            
+            # Находим все дайджесты с is_today=True
+            outdated_digests = session.query(Digest).filter(
+                Digest.is_today == True
+            ).all()
+            
+            updated_count = 0
+            wrong_flags_count = 0
+            
+            for digest in outdated_digests:
+                digest_date = digest.date.date()
+                should_be_today = (digest_date == today)
+                
+                if digest.is_today != should_be_today:
+                    digest.is_today = should_be_today
+                    wrong_flags_count += 1
+                    
+                    # Логируем изменения
+                    action = "установлен" if should_be_today else "снят"
+                    logger.info(f"Для дайджеста ID={digest.id} ({digest_date}) {action} флаг is_today")
+                    updated_count += 1
+            
+            # Также проверяем дайджесты за сегодня, у которых флаг может быть не установлен
+            # Найдем все дайджесты и вручную проверим их дату вместо использования extract
+            todays_digests = []
+            all_digests = session.query(Digest).filter(Digest.is_today == False).all()
+            
+            for digest in all_digests:
+                digest_date = digest.date.date()
+                if digest_date == today:
+                    todays_digests.append(digest)
+            
+            for digest in todays_digests:
+                digest.is_today = True
+                logger.info(f"Для дайджеста ID={digest.id} ({digest.date.date()}) установлен флаг is_today")
+                updated_count += 1
+            
+            # Фиксируем изменения с повторными попытками при ошибках
+            retry_commit = 0
+            while retry_commit < 3:
+                try:
+                    session.commit()
+                    break
+                except Exception as e:
+                    retry_commit += 1
+                    if retry_commit >= 3:
+                        raise
+                    logger.warning(f"Ошибка при фиксации изменений флагов is_today: {str(e)}, повторная попытка {retry_commit}/3")
+                    time.sleep(retry_commit)
+            
+            logger.info(f"Проверены флаги is_today для всех дайджестов. Сегодня: {today}, обновлено: {updated_count}, исправлено неправильных: {wrong_flags_count}")
+            return {"updated": updated_count, "wrong_flags": wrong_flags_count}
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Ошибка при обновлении флагов is_today: {str(e)}")
+            return {"error": str(e)}
+        finally:
+            session.close()
 
 # В файле database/db_manager.py добавим новый метод для поиска дайджестов за сегодня
 
