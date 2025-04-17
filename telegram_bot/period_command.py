@@ -623,22 +623,11 @@ async def period_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
             status_text += " обновлен!"
         else:
             status_text += " создан!"
-        await status_message.edit_text(f"{status_text} Отправляю...")
+        await status_message.edit_text(
+            f"{status_text}\n\n"
+            f"Используйте команду /list для просмотра доступных дайджестов."
+        )
         
-        # Отправляем дайджест
-        safe_text = utils.clean_markdown_text(digest["text"])
-        chunks = utils.split_text(safe_text)
-        
-        for i, chunk in enumerate(chunks):
-            if i == 0:
-                text_html = utils.convert_to_html(chunk)
-                await update.message.reply_text(
-                    f"{digest_type_name.capitalize()} дайджест {period_description}:\n\n{text_html}",
-                    parse_mode='HTML'
-                )
-            else:
-                await update.message.reply_text(utils.convert_to_html(chunk), parse_mode='HTML')
-                
     except Exception as e:
         logger.error(f"Ошибка при создании дайджеста {period_description}: {str(e)}", exc_info=True)
         
