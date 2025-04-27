@@ -14,15 +14,15 @@ from telegram.ext import (
 )
 from config.settings import TELEGRAM_BOT_TOKEN
 from telegram_bot.handlers import (
-    start_command, help_command, digest_command, digest_detailed_command,
-    period_command, category_command, list_digests_command, category_selection_command,
-    message_handler, button_callback,
+    start_command, help_command,
+    period_command, category_command, list_digests_command, category_selection_command, button_callback,
 )
 from telegram_bot.view_digest_helpers import (
     show_full_digest, start_digest_generation, get_category_icon
 )
 from telegram_bot.improved_message_handler import improved_message_handler
 from llm.gemma_model import GemmaLLM
+
 
 logger = logging.getLogger(__name__)
 
@@ -55,17 +55,8 @@ class TelegramBot:
                         help_command(update, context, self.db_manager))
         )
         
-        # Оставляем старые команды для совместимости, но будем рекомендовать использовать /list
-        self.application.add_handler(
-            CommandHandler("digest", lambda update, context: 
-                        digest_command(update, context, self.db_manager))
-        )
-        
-        self.application.add_handler(
-            CommandHandler("brief", lambda update, context: 
-                        digest_command(update, context, self.db_manager))
-        )
-        
+              
+               
         # Команда для периода
         self.application.add_handler(
             CommandHandler("period", lambda update, context: 
@@ -96,10 +87,10 @@ class TelegramBot:
         )
         
         # Обработчик текстовых сообщений для ввода произвольного периода
-        self.application.add_handler(
-            MessageHandler(filters.TEXT & ~filters.COMMAND, lambda update, context: 
-                        message_handler(update, context, self.db_manager, self.llm_model))
-        )
+        #self.application.add_handler(
+         #   MessageHandler(filters.TEXT & ~filters.COMMAND, lambda update, context: 
+          #              message_handler(update, context, self.db_manager, self.llm_model))
+        #)
     
     def run(self):
         """Запуск бота"""
