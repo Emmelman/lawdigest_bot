@@ -1175,6 +1175,10 @@ class DatabaseManager:
         """Сохраняет информацию о генерации дайджеста"""
         session = self.Session()
         try:
+            # Проверяем, что digest_ids - это словарь, а не dict_keys
+            if digest_ids is not None and not isinstance(digest_ids, dict):
+                digest_ids = dict(digest_ids)  # Преобразуем в dict, если это не словарь
+                
             generation = DigestGeneration(
                 timestamp=datetime.now(),
                 source=source,

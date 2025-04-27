@@ -1,7 +1,7 @@
-# telegram_bot/bot.py
 """
-Telegram-бот для взаимодействия с пользователями
+Обновления файла telegram_bot/bot.py для интеграции новых обработчиков команд
 """
+
 import logging
 from telegram import BotCommand
 import asyncio
@@ -16,8 +16,12 @@ from config.settings import TELEGRAM_BOT_TOKEN
 from telegram_bot.handlers import (
     start_command, help_command, digest_command, digest_detailed_command,
     period_command, category_command, list_digests_command, category_selection_command,
-    message_handler, button_callback
+    message_handler, button_callback,
 )
+from telegram_bot.view_digest_helpers import (
+    show_full_digest, start_digest_generation, get_category_icon
+)
+from telegram_bot.improved_message_handler import improved_message_handler
 from llm.gemma_model import GemmaLLM
 
 logger = logging.getLogger(__name__)
@@ -29,8 +33,9 @@ class TelegramBot:
         self.llm_model = llm_model or GemmaLLM()
         self.application = None
         self.menu_commands = [
-            #("digest", "Краткий дайджест новостей"),
-            #("detail", "Подробный дайджест"),
+            # Убираем команды digest и detail, так как они больше не нужны
+            # ("digest", "Краткий дайджест новостей"),
+            # ("detail", "Подробный дайджест"),
             ("period", "Дайджест за произвольный период (сегодня/вчера/YYYY-MM-DD)"),
             ("cat", "Выбрать категорию новостей"),
             ("list", "Список доступных дайджестов"),
@@ -50,7 +55,7 @@ class TelegramBot:
                         help_command(update, context, self.db_manager))
         )
         
-        # Команды дайджестов
+        # Оставляем старые команды для совместимости, но будем рекомендовать использовать /list
         self.application.add_handler(
             CommandHandler("digest", lambda update, context: 
                         digest_command(update, context, self.db_manager))
@@ -61,16 +66,6 @@ class TelegramBot:
                         digest_command(update, context, self.db_manager))
         )
         
-        #self.application.add_handler(
-        #    CommandHandler("digest_detailed", lambda update, context: 
-        #                digest_detailed_command(update, context, self.db_manager))
-        #)
-        
-        #self.application.add_handler(
-        #   CommandHandler("detail", lambda update, context: 
-        #              digest_detailed_command(update, context, self.db_manager))
-        #)
-        
         # Команда для периода
         self.application.add_handler(
             CommandHandler("period", lambda update, context: 
@@ -79,7 +74,7 @@ class TelegramBot:
         
         # Команды выбора категории
         self.application.add_handler(
-        CommandHandler("category", lambda update, context: 
+            CommandHandler("category", lambda update, context: 
                         category_selection_command(update, context, self.db_manager))
         )
 
@@ -88,19 +83,19 @@ class TelegramBot:
                         category_selection_command(update, context, self.db_manager))
         )
         
-        # Список дайджестов
+        # Улучшенная команда списка дайджестов
         self.application.add_handler(
             CommandHandler("list", lambda update, context: 
                         list_digests_command(update, context, self.db_manager))
         )
         
-        # Обработчик колбэков от кнопок
+        # Обработчик колбэков от кнопок (обновленная версия)
         self.application.add_handler(
             CallbackQueryHandler(lambda update, context: 
                                 button_callback(update, context, self.db_manager))
         )
         
-        # Обработчик текстовых сообщений
+        # Обработчик текстовых сообщений для ввода произвольного периода
         self.application.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, lambda update, context: 
                         message_handler(update, context, self.db_manager, self.llm_model))

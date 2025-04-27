@@ -540,101 +540,76 @@ async def period_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
         )
         
         # Получаем ID созданного дайджеста в зависимости от типа
+        digest_ids = []
+        messages = []
+
         if digest_type == "brief" and "brief_digest_id" in digest_result:
-            digest_id = digest_result["brief_digest_id"]
-            digest_type_name = "краткий"
+            digest_ids.append(("brief", digest_result["brief_digest_id"]))
+            messages.append(f"Краткий дайджест (ID: {digest_result['brief_digest_id']})")
+
         elif digest_type == "detailed" and "detailed_digest_id" in digest_result:
-            digest_id = digest_result["detailed_digest_id"]
-            digest_type_name = "подробный"
+            digest_ids.append(("detailed", digest_result["detailed_digest_id"]))
+            messages.append(f"Подробный дайджест (ID: {digest_result['detailed_digest_id']})")
+
         elif digest_type == "both":
-            # Если запрошены оба типа, отправляем их последовательно
-            brief_id = digest_result.get("brief_digest_id")
-            detailed_id = digest_result.get("detailed_digest_id")
+            # Проверяем, какие типы дайджестов были успешно созданы
+            if "brief_digest_id" in digest_result:
+                digest_ids.append(("brief", digest_result["brief_digest_id"]))
+                messages.append(f"Краткий дайджест (ID: {digest_result['brief_digest_id']})")
             
-            if brief_id and detailed_id:
-                await status_message.edit_text(
-                    f"{status_message.text}\n"
-                    f"✅ Оба типа дайджеста успешно созданы!"
-                )
-                
-                # Отправляем сначала краткий дайджест
-                brief_digest = db_manager.get_digest_by_id_with_sections(brief_id)
-                if brief_digest:
-                    # Отправляем краткий дайджест
-                    safe_text = utils.clean_markdown_text(brief_digest["text"])
-                    chunks = utils.split_text(safe_text)
-                    
-                    await update.message.reply_text(
-                        f"Краткий дайджест {period_description}:"
-                    )
-                    
-                    for chunk in chunks:
-                        text_html = utils.convert_to_html(chunk)
-                        await update.message.reply_text(text_html, parse_mode='HTML')
-                
-                # Затем отправляем подробный дайджест
-                detailed_digest = db_manager.get_digest_by_id_with_sections(detailed_id)
-                if detailed_digest:
-                    # Отправляем подробный дайджест
-                    safe_text = utils.clean_markdown_text(detailed_digest["text"])
-                    chunks = utils.split_text(safe_text)
-                    
-                    await update.message.reply_text(
-                        f"Подробный дайджест {period_description}:"
-                    )
-                    
-                    for chunk in chunks:
-                        text_html = utils.convert_to_html(chunk)
-                        await update.message.reply_text(text_html, parse_mode='HTML')
-                
-                return
-            elif brief_id:
-                digest_id = brief_id
-                digest_type_name = "краткий"
-            elif detailed_id:
-                digest_id = detailed_id
-                digest_type_name = "подробный"
-            else:
-                await status_message.edit_text(
-                    f"{status_message.text}\n"
-                    f"❌ Не удалось создать дайджест {period_description}."
-                )
-                return
-        else:
+            if "detailed_digest_id" in digest_result:
+                digest_ids.append(("detailed", digest_result["detailed_digest_id"]))
+                messages.append(f"Подробный дайджест (ID: {digest_result['detailed_digest_id']})")
+
+        if not digest_ids:
             await status_message.edit_text(
                 f"{status_message.text}\n"
                 f"❌ Не удалось создать дайджест типа {digest_type} {period_description}."
             )
             return
-        
-        # Получаем созданный дайджест
-        digest = db_manager.get_digest_by_id_with_sections(digest_id)
-        
-        if not digest:
-            await status_message.edit_text(
-                f"{status_message.text}\n"
-                f"❌ Не удалось получить созданный дайджест (ID: {digest_id})."
-            )
-            return
-        
-        # Обновляем статус
-        status_text = f"{status_message.text}\n✅ Дайджест успешно"
-        if is_today_request and existing_digests:
-            status_text += " обновлен!"
-        else:
-            status_text += " создан!"
-        await status_message.edit_text(
-            f"{status_text}\n\n"
-            f"Используйте команду /list для просмотра доступных дайджестов."
+
+        # Сохраняем информацию о генерации в БД
+        db_ids = {}
+        for dtype, did in digest_ids:
+            db_ids[dtype] = did
+
+        db_manager.save_digest_generation(
+            source="bot",
+            user_id=update.effective_user.id,
+            channels=collect_result.get("channels_stats", {}).keys(),
+            messages_count=total_messages,
+            digest_ids=db_ids,
+            start_date=start_date,
+            end_date=end_date,
+            focus_category=None  # Assuming focus_category is not defined in the current context
         )
-        
+
+        # Обновляем статус с успешным результатом
+        status_text = f"{status_message.text}\n✅ Дайджест(ы) успешно"
+        if is_today_request and existing_digests:
+            status_text += " обновлен(ы)!"
+        else:
+            status_text += " создан(ы)!"
+
+        status_text += f"\n\nСоздано: {', '.join(messages)}"
+        await status_message.edit_text(status_text)
+
+        # Создаем кнопки для просмотра созданных дайджестов
+        keyboard = []
+        for dtype, did in digest_ids:
+            label = "📋 Краткий дайджест" if dtype == "brief" else "📚 Подробный дайджест"
+            keyboard.append([InlineKeyboardButton(label, callback_data=f"view_digest_{did}")])
+
+        # Добавляем кнопку для списка всех дайджестов
+        keyboard.append([InlineKeyboardButton("📋 Список всех дайджестов", callback_data="show_digests_list")])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
     except Exception as e:
         logger.error(f"Ошибка при создании дайджеста {period_description}: {str(e)}", exc_info=True)
-        
-        # Обновляем статус с ошибкой
-        await status_message.edit_text(
-            f"{status_message.text}\n"
-            f"❌ Произошла ошибка: {str(e)}"
+        # Отправляем сообщение с кнопками
+        await update.message.reply_text(
+            f"Дайджест {period_description} готов к просмотру. Выберите опцию:",
+            reply_markup=reply_markup
         )
 def get_digest_type_name(digest_type):
     """Возвращает название типа дайджеста на русском языке"""

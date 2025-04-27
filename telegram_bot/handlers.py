@@ -7,7 +7,7 @@ import asyncio
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-
+from datetime import time, datetime, timedelta
 from config.settings import CATEGORIES, BOT_USERNAME, TELEGRAM_CHANNELS
 from llm.gemma_model import GemmaLLM
 from agents.digester import DigesterAgent
@@ -16,9 +16,18 @@ from agents.analyzer import AnalyzerAgent
 from agents.critic import CriticAgent
 from utils.text_utils import TextUtils
 from telegram_bot.improved_message_handler import improved_message_handler
-
+from telegram_bot.view_digest_helpers import (
+    show_full_digest, start_digest_generation, get_category_icon
+)
 from telegram_bot.period_command import period_command
-
+from telegram_bot.improved_view_digest import (
+       view_digest_callback, 
+       view_digest_section_callback,
+       page_navigation_callback,
+       show_full_digest,
+       get_category_icon,
+       get_short_category_id
+   )
 
 logger = logging.getLogger(__name__)
 
@@ -438,48 +447,96 @@ async def category_command(update: Update, context: ContextTypes.DEFAULT_TYPE, d
         reply_markup=reply_markup
     )
 
+"""
+Улучшенный обработчик команды /list для интерактивного просмотра дайджестов
+"""
 async def list_digests_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_manager):
-    """Обработчик команды /list - список доступных дайджестов"""
-    # Получаем последние 10 дайджестов
-    digests = db_manager.find_digests_by_parameters(limit=10)
-    
+    """Обработчик команды /list - интерактивный список доступных дайджестов"""
+    # Получаем последние дайджесты (увеличиваем лимит до 15)
+    digests = db_manager.find_digests_by_parameters(limit=15)
+    logger.info(f"Найдено {len(digests)} дайджестов: {[d['id'] for d in digests]}")
     if not digests:
-        await update.message.reply_text("Дайджесты еще не сформированы.")
+        await update.message.reply_text("На данный момент нет доступных дайджестов.")
         return
     
-    keyboard = []
+    # Группируем дайджесты по дате для более компактного отображения
+    digests_by_date = {}
     for digest in digests:
-        # Формируем описание дайджеста
+        date_str = digest['date'].strftime('%Y-%m-%d')
+        
+        # Учитываем диапазон дат, если он указан
         if digest.get("date_range_start") and digest.get("date_range_end"):
             days_diff = (digest["date_range_end"] - digest["date_range_start"]).days
             if days_diff > 0:
-                start_date = digest["date_range_start"].strftime("%d.%m.%Y")
-                end_date = digest["date_range_end"].strftime("%d.%m.%Y")
-                date_text = f"{start_date} - {end_date} ({days_diff+1} дн.)"
-            else:
-                date_text = digest["date"].strftime("%d.%m.%Y")
+                date_str = f"{digest['date_range_start'].strftime('%Y-%m-%d')} - {digest['date_range_end'].strftime('%Y-%m-%d')}"
+        
+        if date_str not in digests_by_date:
+            digests_by_date[date_str] = []
+        
+        digests_by_date[date_str].append(digest)
+    
+    # Создаем клавиатуру с кнопками для каждой даты
+    keyboard = []
+    
+    # Сортируем даты в обратном порядке (сначала новые)
+    sorted_dates = sorted(digests_by_date.keys(), reverse=True)
+    
+    for date_str in sorted_dates:
+        date_digests = digests_by_date[date_str]
+        
+        # Определяем, есть ли дайджесты разных типов за эту дату
+        has_brief = any(d["digest_type"] == "brief" for d in date_digests)
+        has_detailed = any(d["digest_type"] == "detailed" for d in date_digests)
+        
+        # Если есть оба типа, создаем отдельные кнопки
+        if has_brief and has_detailed:
+            brief_digest = next((d for d in date_digests if d["digest_type"] == "brief"), None)
+            detailed_digest = next((d for d in date_digests if d["digest_type"] == "detailed"), None)
+            
+            # Добавляем метки для кнопок
+            brief_label = f"📋 {date_str} (краткий)"
+            detailed_label = f"📚 {date_str} (подробный)"
+            
+            # Если дайджест за сегодня, добавляем метку
+            today = datetime.now().date()
+            if brief_digest and brief_digest.get("date").date() == today:
+                brief_label = f"📌 {brief_label}"
+            if detailed_digest and detailed_digest.get("date").date() == today:
+                detailed_label = f"📌 {detailed_label}"
+            
+            keyboard.append([
+                InlineKeyboardButton(brief_label, callback_data=f"view_digest_{brief_digest['id']}") if brief_digest else None,
+                InlineKeyboardButton(detailed_label, callback_data=f"view_digest_{detailed_digest['id']}") if detailed_digest else None
+            ])
         else:
-            date_text = digest["date"].strftime("%d.%m.%Y")
-        
-        # Добавляем информацию о фокусе, если есть
-        focus_text = ""
-        if digest.get("focus_category"):
-            focus_text = f" - {digest['focus_category']}"
-        
-        # Добавляем время создания
-        created_at = ""
-        if digest.get("created_at"):
-            created_at = f" ({digest['created_at'].strftime('%H:%M')})"
-        
-        button_text = f"{date_text}{focus_text} ({digest['digest_type']}){created_at}"
-        keyboard.append([
-            InlineKeyboardButton(button_text, callback_data=f"show_digest_{digest['id']}")
-        ])
+            # Если есть только один тип, создаем одну кнопку
+            for digest in date_digests:
+                digest_type_label = "краткий" if digest["digest_type"] == "brief" else "подробный"
+                
+                # Формируем метку с учетом фокуса, если есть
+                button_label = f"📋 {date_str} ({digest_type_label})"
+                if digest.get("focus_category"):
+                    button_label += f" - {digest['focus_category']}"
+                
+                # Если дайджест за сегодня, добавляем метку
+                today = datetime.now().date()
+                if digest.get("date").date() == today:
+                    button_label = f"📌 {button_label}"
+                
+                keyboard.append([
+                    InlineKeyboardButton(button_label, callback_data=f"view_digest_{digest['id']}")
+                ])
+    
+    # Добавляем кнопку для создания нового дайджеста
+    keyboard.append([
+        InlineKeyboardButton("🆕 Создать новый дайджест", callback_data="create_new_digest")
+    ])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        "Выберите дайджест для просмотра:", 
+        "📊 Доступные дайджесты:\n\n"
+        "Выберите дайджест для просмотра:",
         reply_markup=reply_markup
     )
 
@@ -835,179 +892,211 @@ async def handle_channel_period_input(update, context, db_manager, user_input):
 # Обработчик кнопок и генерация дайджеста (см. ранее определенную функцию handle_digest_generation)
 # В файле telegram_bot/handlers.py нужно обновить функцию button_callback
 
+"""
+Обновленный обработчик колбэков для работы с интерактивными кнопками
+"""
+"""
+Обновленный обработчик колбэков для интерактивных кнопок
+"""
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes
+from datetime import datetime, timedelta, time
+
+logger = logging.getLogger(__name__)
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, db_manager):
-    """Обработчик нажатий на кнопки"""
+    """Обработчик нажатий на кнопки с сокращенными callback_data"""
     query = update.callback_query
+    
+    # Предварительно обрабатываем колбэк, чтобы пользователь не ждал
     await query.answer()
     
-    # Обработка запросов на просмотр дайджеста
-    if query.data.startswith("show_digest_"):
-        try:
-            digest_id = int(query.data.replace("show_digest_", ""))
-            await show_digest_by_id(query.message, digest_id, db_manager)
-        except Exception as e:
-            logger.error(f"Ошибка при просмотре дайджеста: {str(e)}")
-            await query.message.reply_text(f"Произошла ошибка при загрузке дайджеста: {str(e)}")
-    
-    # Добавляем обработку select_digest_X для команды /cat
-    elif query.data.startswith("select_digest_"):
-        try:
-            digest_id = int(query.data.replace("select_digest_", ""))
-            await show_digest_categories(query.message, digest_id, db_manager)
-        except Exception as e:
-            logger.error(f"Ошибка при выборе дайджеста: {str(e)}")
-            await query.message.reply_text(f"Произошла ошибка при выборе дайджеста: {str(e)}")
-    
-    # Добавляем обработку cat_X_Y для просмотра категории дайджеста
-    elif query.data.startswith("cat_"):
-        try:
-            # Формат: cat_id_category
-            parts = query.data.split("_", 2)
-            if len(parts) == 3:
-                digest_id = int(parts[1])
-                category = parts[2]
-                
-                # Получаем дайджест по ID
-                digest = db_manager.get_digest_by_id_with_sections(digest_id)
-                
-                if not digest:
-                    await query.message.reply_text(f"Дайджест не найден.")
-                    return
-                
-                # Ищем секцию для указанной категории
-                section = next((s for s in digest["sections"] if s["category"] == category), None)
-                
-                if not section:
-                    await query.message.reply_text(f"Категория '{category}' не найдена в дайджесте.")
-                    return
-                
-                # Отправляем секцию
-                safe_text = utils.clean_markdown_text(section["text"])
-                chunks = utils.split_text(safe_text)
-                
-                header = f"Дайджест от {digest['date'].strftime('%d.%m.%Y')} - категория: {category}"
-                
-                for i, chunk in enumerate(chunks):
-                    if i == 0:
-                        text_html = utils.convert_to_html(chunk)
-                        await query.message.reply_text(f"{header}\n\n{text_html}", parse_mode='HTML')
-                    else:
-                        await query.message.reply_text(utils.convert_to_html(chunk), parse_mode='HTML')
-        except Exception as e:
-            logger.error(f"Ошибка при показе категории: {str(e)}")
-            await query.message.reply_text(f"Произошла ошибка при показе категории: {str(e)}")
-    
-    # Обработка для возврата к списку дайджестов
-    elif query.data == "back_to_digest_list":
-        try:
-        # Получаем последние 10 дайджестов
-            digests = db_manager.find_digests_by_parameters(limit=10)
+    try:
+        # Обработка различных типов колбэков с сокращенными данными
         
-            if not digests:
-                await query.message.reply_text("Дайджесты еще не сформированы.")
-                return
-            
-            keyboard = []
-            for digest in digests:
-                # Формируем описание дайджеста
-                if digest.get("date_range_start") and digest.get("date_range_end"):
-                    days_diff = (digest["date_range_end"] - digest["date_range_start"]).days
-                    if days_diff > 0:
-                        start_date = digest["date_range_start"].strftime("%d.%m.%Y")
-                        end_date = digest["date_range_end"].strftime("%d.%m.%Y")
-                        date_text = f"{start_date} - {end_date} ({days_diff+1} дн.)"
-                    else:
-                        date_text = digest["date"].strftime("%d.%m.%Y")
-                else:
-                    date_text = digest["date"].strftime("%d.%m.%Y")
-                
-                # Добавляем информацию о фокусе, если есть
-                focus_text = ""
-                if digest.get("focus_category"):
-                    focus_text = f" - {digest['focus_category']}"
-                
-                # Добавляем время создания
-                created_at = ""
-                if digest.get("created_at"):
-                    created_at = f" ({digest['created_at'].strftime('%H:%M')})"
-                
-                button_text = f"{date_text}{focus_text} ({digest['digest_type']}){created_at}"
-                keyboard.append([
-                    InlineKeyboardButton(button_text, callback_data=f"select_digest_{digest['id']}")
-                ])
-            
+        # Просмотр дайджеста (view_digest_X)
+        if query.data.startswith("view_digest_"):
+            await view_digest_callback(update, context, db_manager)
+        
+        # Просмотр секции дайджеста (ds_X_Y - digest section)
+        elif query.data.startswith("ds_"):
+            await view_digest_section_callback(update, context, db_manager)
+        
+        # Пагинация (pg_X_Y_Z - page navigation)
+        elif query.data.startswith("pg_"):
+            await page_navigation_callback(update, context, db_manager)
+        
+        # Просмотр полного дайджеста (df_X - digest full)
+        elif query.data.startswith("df_"):
+            await show_full_digest(update, context, db_manager)
+        
+        # Список дайджестов (sl - show list)
+        elif query.data == "sl":
+            await list_digests_command(update, context, db_manager)
+        
+        # Создание нового дайджеста (cd - create digest)
+        elif query.data == "cd":
+            # Предлагаем пользователю выбрать период для дайджеста
+            keyboard = [
+                [InlineKeyboardButton("📅 За сегодня", callback_data="nd_today")],
+                [InlineKeyboardButton("📆 За вчера", callback_data="nd_yesterday")],
+                [InlineKeyboardButton("📊 Указать период", callback_data="nd_custom")]
+            ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            # Используем query.message.reply_text вместо update.message.reply_text
-            await query.message.reply_text(
-                "Выберите дайджест для просмотра:", 
+            await query.message.edit_text(
+                "Выберите период для создания нового дайджеста:",
                 reply_markup=reply_markup
             )
-        except Exception as e:
-            logger.error(f"Ошибка при отображении списка дайджестов: {str(e)}")
-            await query.message.reply_text(f"Произошла ошибка при загрузке списка дайджестов: {str(e)}")
         
-    # Обработка для просмотра полного дайджеста
-    elif query.data.startswith("full_digest_"):
-        try:
-            digest_id = int(query.data.replace("full_digest_", ""))
-            await show_digest_by_id(query.message, digest_id, db_manager)
-        except Exception as e:
-            logger.error(f"Ошибка при просмотре полного дайджеста: {str(e)}")
-            await query.message.reply_text(f"Произошла ошибка при загрузке дайджеста: {str(e)}")
-    
-    # Обработка для выбора сегодняшнего дайджеста
-    elif query.data == "select_today_digest":
-        await handle_digest_selection(update, context, db_manager, query.data)
-        
-    # Обработка выбора категории (старый формат)
-    elif query.data.startswith("cat_brief_") or query.data.startswith("cat_detailed_"):
-        # ... сохраняем существующую обработку ...
-        parts = query.data.split("_", 2)
-        if len(parts) == 3:
-            digest_type = parts[1]  # brief или detailed
-            category = parts[2]     # название категории
+        # Обработка выбора периода для нового дайджеста (nd_X - new digest)
+        elif query.data.startswith("nd_"):
+            period_type = query.data.replace("nd_", "")
             
-            # Получаем последний дайджест нужного типа
-            digest = db_manager.get_latest_digest_with_sections(digest_type=digest_type)
-            
-            if not digest:
-                # Если дайджеста такого типа нет, берем любой
-                digest = db_manager.get_latest_digest_with_sections()
-            
-            if not digest:
-                await query.message.reply_text(f"К сожалению, дайджест еще не сформирован.")
-                return
-            
-            # Ищем соответствующую секцию в дайджесте
-            section = next(
-                (s for s in digest["sections"] if s["category"] == category), 
-                None
-            )
-            
-            if not section:
-                await query.message.reply_text(
-                    f"Информация по категории '{category}' отсутствует в последнем дайджесте.",
-                    parse_mode='HTML'
+            if period_type == "today":
+                # Запускаем генерацию дайджеста за сегодня
+                today = datetime.now().date()
+                start_date = datetime.combine(today, time.min)
+                end_date = datetime.now()
+                
+                await start_digest_generation(
+                    query.message, 
+                    start_date, 
+                    end_date, 
+                    "За сегодня", 
+                    db_manager, 
+                    context
                 )
-                return
+                
+            elif period_type == "yesterday":
+                # Запускаем генерацию дайджеста за вчера
+                yesterday = (datetime.now() - timedelta(days=1)).date()
+                start_date = datetime.combine(yesterday, time.min)
+                end_date = datetime.combine(yesterday, time.max)
+                
+                await start_digest_generation(
+                    query.message, 
+                    start_date, 
+                    end_date, 
+                    "За вчера", 
+                    db_manager, 
+                    context
+                )
+                
+            elif period_type == "custom":
+                # Запрашиваем у пользователя период
+                await query.message.edit_text(
+                    "Введите период для дайджеста в формате:\n"
+                    "1. ГГГГ-ММ-ДД (одна дата)\n"
+                    "2. ГГГГ-ММ-ДД ГГГГ-ММ-ДД (период)\n\n"
+                    "Например: 2025-04-15 или 2025-04-10 2025-04-15"
+                )
+                
+                # Устанавливаем флаг ожидания ввода периода
+                context.user_data["awaiting_date_range"] = True
+                
+        # Показать категорию из определенного дайджеста (cat_X_Y)
+        elif query.data.startswith("cat_"):
+            try:
+                # Формат: cat_id_category
+                parts = query.data.split("_", 2)
+                if len(parts) == 3:
+                    digest_id = int(parts[1])
+                    category = parts[2]
+                    
+                    # Проверяем, не слишком ли длинное название категории для callback_data
+                    if len(category) > 30:  # Telegram имеет лимит ~64 байта
+                        logger.warning(f"Слишком длинное имя категории: '{category}' ({len(category)} символов)")
+                        
+                        # Если категория слишком длинная, создаем короткий ID
+                        short_id = get_short_category_id(category)
+                        
+                        # Сохраняем маппинг в user_data
+                        if not context.user_data.get("category_mapping"):
+                            context.user_data["category_mapping"] = {}
+                        
+                        mapping_key = f"{digest_id}_{short_id}"
+                        context.user_data["category_mapping"][mapping_key] = category
+                        
+                        # Перенаправляем на новый обработчик с коротким ID
+                        await view_digest_section_callback(update, context, db_manager)
+                        return
+                    
+                    # Получаем дайджест по ID
+                    digest = db_manager.get_digest_by_id_with_sections(digest_id)
+                    
+                    if not digest:
+                        await query.message.reply_text(f"Дайджест не найден.")
+                        return
+                    
+                    # Ищем секцию для указанной категории
+                    section = next((s for s in digest["sections"] if s["category"] == category), None)
+                    
+                    if not section:
+                        await query.message.reply_text(f"Категория '{category}' не найдена в дайджесте.")
+                        return
+                    
+                    # Отправляем секцию
+                    from utils.text_utils import TextUtils
+                    safe_text = TextUtils.clean_markdown_text(section["text"])
+                    chunks = TextUtils.split_text(safe_text)
+                    
+                    header = f"Дайджест от {digest['date'].strftime('%d.%m.%Y')} - категория: {category}"
+                    
+                    for i, chunk in enumerate(chunks):
+                        if i == 0:
+                            text_html = TextUtils.convert_to_html(chunk)
+                            await query.message.reply_text(f"{header}\n\n{text_html}", parse_mode='HTML')
+                        else:
+                            await query.message.reply_text(TextUtils.convert_to_html(chunk), parse_mode='HTML')
+            except Exception as e:
+                logger.error(f"Ошибка при показе категории: {str(e)}")
+                await query.message.reply_text(f"Произошла ошибка при показе категории: {str(e)}")
+        
+        # Обработка для возврата к списку дайджестов
+        elif query.data == "back_to_digest_list" or query.data == "show_digests_list":
+            try:
+                # Используем доработанную команду list_digests_command
+                await list_digests_command(update, context, db_manager)
+            except Exception as e:
+                logger.error(f"Ошибка при отображении списка дайджестов: {str(e)}")
+                await query.message.reply_text(f"Произошла ошибка при загрузке списка дайджестов: {str(e)}")
+        
+        # Обработка выбора дайджеста из списка
+        elif query.data.startswith("select_digest_"):
+            try:
+                digest_id = int(query.data.replace("select_digest_", ""))
+                digest = db_manager.get_digest_by_id_with_sections(digest_id)
+                
+                if digest:
+                    # Перенаправляем на просмотр дайджеста
+                    modified_query = query
+                    modified_query.data = f"view_digest_{digest_id}"
+                    await view_digest_callback(update, context, db_manager)
+                else:
+                    await query.message.reply_text("Дайджест не найден или был удален.")
+            except Exception as e:
+                logger.error(f"Ошибка при выборе дайджеста: {str(e)}")
+                await query.message.reply_text(f"Произошла ошибка при выборе дайджеста: {str(e)}")
+        
+        # Если колбэк не распознан
+        else:
+            logger.warning(f"Неизвестный callback_data: {query.data}")
+            await query.message.reply_text(f"Неизвестная команда. Пожалуйста, используйте /list для просмотра дайджестов.")
             
-            # Подготавливаем текст для ответа
-            digest_type_name = "Краткий обзор" if digest_type == "brief" else "Подробный обзор"
-            header = f"Дайджест за {digest['date'].strftime('%d.%m.%Y')}\n{digest_type_name} категории: {category}\n\n"
-            
-            # Отправляем секцию (возможно, разбитую на части)
-            full_text = header + section["text"]
-            safe_text = utils.clean_markdown_text(full_text)
-            chunks = utils.split_text(safe_text)
-            
-            for chunk in chunks:
-                text_html = utils.convert_to_html(chunk)
-                await query.message.reply_text(text_html, parse_mode='HTML')
-    else:
-        await query.message.reply_text(f"Неизвестная команда: {query.data}")
-
-# Вспомогательные функции
+    except Exception as e:
+        logger.error(f"Общая ошибка в обработчике колбэков: {str(e)}", exc_info=True)
+        
+        # Если возникла ошибка, отправляем новое сообщение
+        try:
+            await query.message.reply_text(
+                f"Произошла ошибка при обработке команды: {str(e)}\n"
+                "Пожалуйста, используйте /list для просмотра дайджестов."
+            )
+        except Exception:
+            # Если не можем отправить сообщение, логируем ошибку
+            logger.error("Не удалось отправить сообщение об ошибке пользователю")
 async def show_digest_by_id(message, digest_id, db_manager):
     """Показывает дайджест по его ID"""
     # Получаем дайджест с секциями
@@ -1228,6 +1317,465 @@ async def handle_digest_generation(update, context, db_manager, start_date, end_
             f"✅ Дайджест {description} успешно сформирован!\n\n"
             f"Обработано {total_messages} сообщений, проанализировано {analyzed_count}\n\n"
             f"Используйте команду /list для просмотра доступных дайджестов."
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка при генерации дайджеста: {str(e)}", exc_info=True)
+        await status_message.edit_text(
+            f"{status_message.text}\n\n❌ Произошла ошибка: {str(e)}"
+        )
+"""
+Обработчик для интерактивного просмотра дайджестов
+"""
+async def view_digest_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, db_manager):
+    """Обработчик колбэка для просмотра дайджеста"""
+    query = update.callback_query
+    await query.answer()
+   
+    # Извлекаем ID дайджеста из callback_data
+    digest_id = int(query.data.replace("view_digest_", ""))
+   
+    # Получаем дайджест с секциями по ID
+    digest = db_manager.get_digest_by_id_with_sections(digest_id)
+   
+    if not digest:
+        await query.message.reply_text("❌ Дайджест не найден или был удален.")
+        return
+   
+    # Формируем сводное содержание дайджеста
+    digest_type = "краткий" if digest["digest_type"] == "brief" else "подробный"
+    date_str = digest["date"].strftime("%d.%m.%Y")
+   
+    # Если есть диапазон дат, используем его
+    if digest.get("date_range_start") and digest.get("date_range_end"):
+        if digest["date_range_start"].date() != digest["date_range_end"].date():
+            date_str = f"{digest['date_range_start'].strftime('%d.%m.%Y')} - {digest['date_range_end'].strftime('%d.%m.%Y')}"
+   
+    # Создаем статистику категорий
+    categories_stats = {}
+    for section in digest["sections"]:
+        categories_stats[section["category"]] = len(section["text"].split("\n\n"))
+   
+    # Формируем текст оглавления
+    table_of_contents = f"📊 {digest_type.capitalize()} дайджест за {date_str}\n\n"
+   
+    # Добавляем информацию о фокусе, если есть
+    if digest.get("focus_category"):
+        table_of_contents += f"🔍 Фокус: {digest['focus_category']}\n\n"
+   
+    # Добавляем статистику по категориям
+    table_of_contents += "📋 Содержание:\n"
+    for category, count in categories_stats.items():
+        icon = get_category_icon(category)
+        table_of_contents += f"{icon} {category.capitalize()}: примерно {count} сообщений\n"
+   
+    # Создаем клавиатуру для выбора категорий
+    keyboard = []
+   
+    # Инициализируем кэш категорий, если его нет
+    if not context.user_data.get("category_mapping"):
+        context.user_data["category_mapping"] = {}
+   
+    # ИЗМЕНЕНИЕ: Для каждой категории создаем кнопку с коротким ID
+    for section in digest["sections"]:
+        category = section["category"]
+        icon = get_category_icon(category)
+        
+        # Создаем короткий ID для категории
+        short_id = get_short_category_id(category)
+        
+        # Сохраняем маппинг ID -> категория
+        mapping_key = f"{digest_id}_{short_id}"
+        context.user_data["category_mapping"][mapping_key] = category
+        
+        # Создаем кнопку с коротким callback_data
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{icon} {category.capitalize()}", 
+                callback_data=f"ds_{digest_id}_{short_id}"
+            )
+        ])
+   
+    # ИЗМЕНЕНИЕ: Обновляем кнопку полного просмотра
+    keyboard.append([
+        InlineKeyboardButton("📄 Полный текст дайджеста", callback_data=f"df_{digest_id}")
+    ])
+   
+    # Кнопка возврата к списку дайджестов (изменена для краткости)
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Назад к списку дайджестов", callback_data="sl")
+    ])
+   
+    reply_markup = InlineKeyboardMarkup(keyboard)
+   
+    # Отправляем оглавление дайджеста
+    await query.message.edit_text(
+        table_of_contents,
+        reply_markup=reply_markup
+    )
+
+async def view_digest_section_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, db_manager):
+    """Обработчик колбэка для просмотра секции дайджеста"""
+    query = update.callback_query
+    await query.answer()
+    
+    # Извлекаем ID дайджеста и категорию из callback_data
+    # Формат: digest_section_ID_CATEGORY
+    parts = query.data.split("_", 3)
+    if len(parts) < 4:
+        await query.message.reply_text("❌ Неверный формат callback_data")
+        return
+    
+    digest_id = int(parts[2])
+    category = parts[3]
+    
+    # Получаем дайджест с секциями
+    digest = db_manager.get_digest_by_id_with_sections(digest_id)
+    
+    if not digest:
+        await query.message.reply_text("❌ Дайджест не найден или был удален.")
+        return
+    
+    # Ищем секцию по категории
+    section = None
+    for s in digest["sections"]:
+        if s["category"] == category:
+            section = s
+            break
+    
+    if not section:
+        await query.message.reply_text(f"❌ Секция '{category}' не найдена в дайджесте.")
+        return
+    
+    # Разделяем содержимое секции на части для пагинации
+    # (используем разделение по параграфам для естественного деления)
+    section_parts = []
+    current_part = ""
+    for paragraph in section["text"].split("\n\n"):
+        if len(current_part) + len(paragraph) + 2 <= 3500:  # Лимит Telegram на длину сообщения
+            if current_part:
+                current_part += "\n\n" + paragraph
+            else:
+                current_part = paragraph
+        else:
+            section_parts.append(current_part)
+            current_part = paragraph
+    
+    if current_part:
+        section_parts.append(current_part)
+    
+    # Если есть несколько частей, реализуем пагинацию
+    if len(section_parts) > 1:
+        # Сохраняем в context_data информацию о текущей странице и секции
+        if not context.user_data.get("pagination"):
+            context.user_data["pagination"] = {}
+        
+        pagination_key = f"digest_{digest_id}_{category}"
+        if pagination_key not in context.user_data["pagination"]:
+            context.user_data["pagination"][pagination_key] = {
+                "current_page": 0,
+                "total_pages": len(section_parts),
+                "parts": section_parts
+            }
+        
+        pagination_data = context.user_data["pagination"][pagination_key]
+        current_page = pagination_data["current_page"]
+        
+        # Формируем заголовок с информацией о пагинации
+        digest_type = "краткий" if digest["digest_type"] == "brief" else "подробный"
+        date_str = digest["date"].strftime("%d.%m.%Y")
+        
+        header = f"📊 {digest_type.capitalize()} дайджест за {date_str}\n"
+        header += f"📂 Категория: {category.capitalize()}\n"
+        header += f"📄 Страница {current_page + 1}/{len(section_parts)}\n\n"
+        
+        # Конвертируем текст для корректного отображения в Telegram
+        content = utils.convert_to_html(header + section_parts[current_page])
+        
+        # Создаем клавиатуру с кнопками навигации
+        keyboard = []
+        
+        # Добавляем кнопки пагинации
+        pagination_buttons = []
+        if current_page > 0:
+            pagination_buttons.append(
+                InlineKeyboardButton("⬅️ Предыдущая", callback_data=f"page_{digest_id}_{category}_prev")
+            )
+        if current_page < len(section_parts) - 1:
+            pagination_buttons.append(
+                InlineKeyboardButton("Следующая ➡️", callback_data=f"page_{digest_id}_{category}_next")
+            )
+        
+        if pagination_buttons:
+            keyboard.append(pagination_buttons)
+        
+        # Добавляем кнопку возврата к оглавлению дайджеста
+        keyboard.append([
+            InlineKeyboardButton("🔙 К оглавлению дайджеста", callback_data=f"view_digest_{digest_id}")
+        ])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Отправляем секцию с кнопками пагинации
+        await query.message.edit_text(
+            content,
+            reply_markup=reply_markup,
+            parse_mode='HTML'
+        )
+    else:
+        # Если только одна часть, отправляем ее без пагинации
+        digest_type = "краткий" if digest["digest_type"] == "brief" else "подробный"
+        date_str = digest["date"].strftime("%d.%m.%Y")
+        
+        header = f"📊 {digest_type.capitalize()} дайджест за {date_str}\n"
+        header += f"📂 Категория: {category.capitalize()}\n\n"
+        
+        # Конвертируем текст для корректного отображения в Telegram
+        content = utils.convert_to_html(header + section["text"])
+        
+        # Создаем клавиатуру с кнопкой возврата
+        keyboard = [[
+            InlineKeyboardButton("🔙 К оглавлению дайджеста", callback_data=f"view_digest_{digest_id}")
+        ]]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Отправляем секцию
+        await query.message.edit_text(
+            content,
+            reply_markup=reply_markup,
+            parse_mode='HTML'
+        )
+
+async def page_navigation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, db_manager):
+    """Обработчик колбэка для пагинации секций дайджеста"""
+    query = update.callback_query
+    await query.answer()
+    
+    # Извлекаем информацию из callback_data
+    # Формат: page_DIGEST_ID_CATEGORY_ACTION
+    parts = query.data.split("_", 4)
+    if len(parts) < 5:
+        await query.message.reply_text("❌ Неверный формат callback_data для пагинации")
+        return
+    
+    digest_id = int(parts[1])
+    category = parts[2]
+    action = parts[3]  # prev или next
+    
+    # Получаем данные пагинации из user_data
+    pagination_key = f"digest_{digest_id}_{category}"
+    if not context.user_data.get("pagination") or pagination_key not in context.user_data["pagination"]:
+        await query.message.reply_text("❌ Данные пагинации не найдены. Пожалуйста, начните просмотр заново.")
+        return
+    
+    pagination_data = context.user_data["pagination"][pagination_key]
+    current_page = pagination_data["current_page"]
+    total_pages = pagination_data["total_pages"]
+    
+    # Обновляем текущую страницу в зависимости от действия
+    if action == "prev" and current_page > 0:
+        current_page -= 1
+    elif action == "next" and current_page < total_pages - 1:
+        current_page += 1
+    else:
+        # Если действие некорректно, игнорируем
+        return
+    
+    # Обновляем текущую страницу в context_data
+    pagination_data["current_page"] = current_page
+    
+    # Получаем дайджест для формирования заголовка
+    digest = db_manager.get_digest_by_id_with_sections(digest_id)
+    
+    if not digest:
+        await query.message.reply_text("❌ Дайджест не найден или был удален.")
+        return
+    
+    # Формируем заголовок с информацией о пагинации
+    digest_type = "краткий" if digest["digest_type"] == "brief" else "подробный"
+    date_str = digest["date"].strftime("%d.%m.%Y")
+    
+    header = f"📊 {digest_type.capitalize()} дайджест за {date_str}\n"
+    header += f"📂 Категория: {category.capitalize()}\n"
+    header += f"📄 Страница {current_page + 1}/{total_pages}\n\n"
+    
+    # Конвертируем текст для корректного отображения в Telegram
+    content = utils.convert_to_html(header + pagination_data["parts"][current_page])
+    
+    # Создаем клавиатуру с кнопками навигации
+    keyboard = []
+    
+    # Добавляем кнопки пагинации
+    pagination_buttons = []
+    if current_page > 0:
+        pagination_buttons.append(
+            InlineKeyboardButton("⬅️ Предыдущая", callback_data=f"page_{digest_id}_{category}_prev")
+        )
+    if current_page < total_pages - 1:
+        pagination_buttons.append(
+            InlineKeyboardButton("Следующая ➡️", callback_data=f"page_{digest_id}_{category}_next")
+        )
+    
+    if pagination_buttons:
+        keyboard.append(pagination_buttons)
+    
+    # Добавляем кнопку возврата к оглавлению дайджеста
+    keyboard.append([
+        InlineKeyboardButton("🔙 К оглавлению дайджеста", callback_data=f"view_digest_{digest_id}")
+    ])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Отправляем обновленную секцию с кнопками пагинации
+    await query.message.edit_text(
+        content,
+        reply_markup=reply_markup,
+        parse_mode='HTML'
+    )        
+"""
+Вспомогательные функции для интерактивного просмотра дайджестов
+"""
+async def start_digest_generation(message, start_date, end_date, period_description, db_manager, context):
+    """
+    Запускает процесс генерации дайджеста по указанным параметрам
+    
+    Args:
+        message (Message): Объект сообщения Telegram
+        start_date (datetime): Начальная дата
+        end_date (datetime): Конечная дата
+        period_description (str): Описание периода для отображения
+        db_manager (DatabaseManager): Менеджер БД
+        context (CallbackContext): Контекст Telegram
+    """
+    # Отправляем сообщение о начале генерации
+    status_message = await message.edit_text(
+        f"Начинаю создание дайджеста {period_description}.\n\n"
+        f"Сбор данных... ⏳"
+    )
+    
+    try:
+        # Рассчитываем количество дней в периоде
+        days_back = (end_date.date() - start_date.date()).days + 1
+        
+        # Инициализация компонентов
+        from llm.qwen_model import QwenLLM
+        from llm.gemma_model import GemmaLLM
+        from agents.data_collector import DataCollectorAgent
+        from agents.analyzer import AnalyzerAgent
+        from agents.digester import DigesterAgent
+        
+        qwen_model = QwenLLM()
+        gemma_model = GemmaLLM()
+        
+        # Этап 1: Сбор данных
+        collector = DataCollectorAgent(db_manager)
+        
+        # Обновляем статус
+        await status_message.edit_text(
+            f"{status_message.text}\n"
+            f"Собираю данные {period_description}... 📥"
+        )
+        
+        # Асинхронно собираем данные
+        collect_result = await collector.collect_data(
+            days_back=days_back,
+            force_update=False,
+            start_date=start_date,
+            end_date=end_date
+        )
+        
+        total_messages = collect_result.get("total_new_messages", 0)
+        
+        # Обновляем статус
+        await status_message.edit_text(
+            f"{status_message.text}\n"
+            f"✅ Собрано {total_messages} сообщений из каналов\n"
+            f"Анализирую сообщения... 🧠"
+        )
+        
+        # Этап 2: Анализ сообщений
+        analyzer = AnalyzerAgent(db_manager, qwen_model)
+        analyzer.fast_check = True
+        
+        analyze_result = analyzer.analyze_messages_batched(
+            limit=max(total_messages, 50),
+            batch_size=10
+        )
+        
+        analyzed_count = analyze_result.get("analyzed_count", 0)
+        
+        # Обновляем статус
+        await status_message.edit_text(
+            f"{status_message.text}\n"
+            f"✅ Проанализировано {analyzed_count} сообщений\n"
+            f"Формирую дайджест... 📝"
+        )
+        
+        # Этап 3: Создание дайджеста
+        digester = DigesterAgent(db_manager, gemma_model)
+        
+        result = digester.create_digest(
+            date=end_date,
+            days_back=days_back,
+            digest_type="both",  # Создаем оба типа дайджеста
+            update_existing=True
+        )
+        
+        # Проверяем результат
+        if not (result.get("brief_digest_id") or result.get("detailed_digest_id")):
+            await status_message.edit_text(
+                f"{status_message.text}\n"
+                f"❌ Не удалось создать дайджест. Возможно, не найдено достаточно данных."
+            )
+            return
+        
+        # Сохраняем информацию о генерации
+        digest_ids = {}
+        if "brief_digest_id" in result:
+            digest_ids["brief"] = result["brief_digest_id"]
+        if "detailed_digest_id" in result:
+            digest_ids["detailed"] = result["detailed_digest_id"]
+        
+        db_manager.save_digest_generation(
+        source="bot",
+        user_id=context.user_data.get("user_id"),
+        messages_count=total_messages,
+        digest_ids=dict(digest_ids),  # Преобразуйте в dict, если это не словарь
+        start_date=start_date,
+        end_date=end_date
+        )   
+        
+        # Финальное сообщение
+        await status_message.edit_text(
+            f"✅ Дайджест {period_description} успешно сформирован!\n\n"
+            f"Обработано {total_messages} сообщений, проанализировано {analyzed_count}\n\n"
+            f"Выберите дайджест для просмотра:"
+        )
+        
+        # Создаем кнопки для просмотра созданных дайджестов
+        keyboard = []
+        
+        if "brief_digest_id" in result:
+            keyboard.append([
+                InlineKeyboardButton("📋 Открыть краткий дайджест", callback_data=f"view_digest_{result['brief_digest_id']}")
+            ])
+        
+        if "detailed_digest_id" in result:
+            keyboard.append([
+                InlineKeyboardButton("📚 Открыть подробный дайджест", callback_data=f"view_digest_{result['detailed_digest_id']}")
+            ])
+        
+        # Добавляем кнопку возврата к списку дайджестов
+        keyboard.append([
+            InlineKeyboardButton("📋 К списку всех дайджестов", callback_data="sl")
+        ])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await message.reply_text(
+            f"Дайджесты за {period_description} готовы к просмотру:",
+            reply_markup=reply_markup
         )
         
     except Exception as e:
