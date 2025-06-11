@@ -77,7 +77,7 @@ class TelegramBot:
         # Улучшенная команда списка дайджестов
         self.application.add_handler(
             CommandHandler("list", lambda update, context: 
-                        list_digests_command(update, context, self.db_manager))
+                        list_digests_command(update.message, context, self.db_manager))
         )
         
         # Обработчик колбэков от кнопок (обновленная версия)

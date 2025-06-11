@@ -126,8 +126,8 @@ async def view_digest_section_callback(update: Update, context: ContextTypes.DEF
     try:
         # Извлекаем информацию из callback_data
         # Формат: ds_DIGEST_ID_SHORT_CATEGORY_ID
-        parts = query.data.split("_", 3)
-        if len(parts) < 4:
+        parts = query.data.split("_", 2)
+        if len(parts) < 3:
             await query.message.reply_text("❌ Неверный формат callback_data")
             return
         

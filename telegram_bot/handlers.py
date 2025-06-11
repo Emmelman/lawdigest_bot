@@ -4,6 +4,7 @@
 import logging
 import re
 import asyncio
+import telegram
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -28,6 +29,7 @@ from telegram_bot.improved_view_digest import (
        get_category_icon,
        get_short_category_id
    )
+from telegram_bot.improved_view_digest import get_short_category_id
 
 logger = logging.getLogger(__name__)
 
@@ -106,13 +108,13 @@ async def category_command(update: Update, context: ContextTypes.DEFAULT_TYPE, d
 """
 Улучшенный обработчик команды /list для интерактивного просмотра дайджестов
 """
-async def list_digests_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_manager):
+async def list_digests_command(message_object: telegram.Message, context: ContextTypes.DEFAULT_TYPE, db_manager):
     """Обработчик команды /list - интерактивный список доступных дайджестов"""
     # Получаем последние дайджесты (увеличиваем лимит до 15)
     digests = db_manager.find_digests_by_parameters(limit=15)
     logger.info(f"Найдено {len(digests)} дайджестов: {[d['id'] for d in digests]}")
     if not digests:
-        await update.message.reply_text("На данный момент нет доступных дайджестов.")
+        await message_object.reply_text("На данный момент нет доступных дайджестов.")
         return
     
     # Группируем дайджесты по дате для более компактного отображения
@@ -185,12 +187,12 @@ async def list_digests_command(update: Update, context: ContextTypes.DEFAULT_TYP
     
     # Добавляем кнопку для создания нового дайджеста
     keyboard.append([
-        InlineKeyboardButton("🆕 Создать новый дайджест", callback_data="create_new_digest")
+        InlineKeyboardButton("🆕 Создать новый дайджест", callback_data="cd")
     ])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text(
+    await message_object.reply_text(
         "📊 Доступные дайджесты:\n\n"
         "Выберите дайджест для просмотра:",
         reply_markup=reply_markup
@@ -303,13 +305,13 @@ async def show_digest_categories(message, digest_id, db_manager):
     for category in categories:
         icon = get_category_icon(category)
         # Используем формат cat_digest_id_category для передачи ID дайджеста
-        keyboard.append([InlineKeyboardButton(f"{icon} {category}", callback_data=f"cat_{digest_id}_{category}")])
+        keyboard.append([InlineKeyboardButton(f"{icon} {category}", callback_data=f"ds_{digest_id}_{get_short_category_id(category)}")])
     
     # Добавляем кнопку "Весь дайджест"
-    keyboard.append([InlineKeyboardButton("📄 Весь дайджест", callback_data=f"full_digest_{digest_id}")])
+    keyboard.append([InlineKeyboardButton("📄 Весь дайджест", callback_data=f"df_{digest_id}")])
     
     # Добавляем кнопку "Назад к списку дайджестов"
-    keyboard.append([InlineKeyboardButton("⬅️ Назад к списку", callback_data="back_to_digest_list")])
+    keyboard.append([InlineKeyboardButton("⬅️ Назад к списку", callback_data="sl")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -517,8 +519,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, db
             await show_full_digest(update, context, db_manager)
         
         # Список дайджестов (sl - show list)
-        elif query.data == "sl":
-            await list_digests_command(update, context, db_manager)
+        elif query.data == "sl": # Эта кнопка "Назад к списку дайджестов"
+            try:
+                # Передаем query.message, которое является объектом сообщения, к которому привязана кнопка
+                await list_digests_command(query.message, context, db_manager)
+            except Exception as e:
+                logger.error(f"Ошибка при отображении списка дайджестов: {str(e)}")
+                await query.message.reply_text(f"Произошла ошибка при загрузке списка дайджестов: {str(e)}")
         
         # Создание нового дайджеста (cd - create digest)
         elif query.data == "cd":
@@ -582,65 +589,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, db
                 context.user_data["awaiting_date_range"] = True
                 
         # Показать категорию из определенного дайджеста (cat_X_Y)
-        elif query.data.startswith("cat_"):
-            try:
-                # Формат: cat_id_category
-                parts = query.data.split("_", 2)
-                if len(parts) == 3:
-                    digest_id = int(parts[1])
-                    category = parts[2]
-                    
-                    # Проверяем, не слишком ли длинное название категории для callback_data
-                    if len(category) > 30:  # Telegram имеет лимит ~64 байта
-                        logger.warning(f"Слишком длинное имя категории: '{category}' ({len(category)} символов)")
-                        
-                        # Если категория слишком длинная, создаем короткий ID
-                        short_id = get_short_category_id(category)
-                        
-                        # Сохраняем маппинг в user_data
-                        if not context.user_data.get("category_mapping"):
-                            context.user_data["category_mapping"] = {}
-                        
-                        mapping_key = f"{digest_id}_{short_id}"
-                        context.user_data["category_mapping"][mapping_key] = category
-                        
-                        # Перенаправляем на новый обработчик с коротким ID
-                        await view_digest_section_callback(update, context, db_manager)
-                        return
-                    
-                    # Получаем дайджест по ID
-                    digest = db_manager.get_digest_by_id_with_sections(digest_id)
-                    
-                    if not digest:
-                        await query.message.reply_text(f"Дайджест не найден.")
-                        return
-                    
-                    # Ищем секцию для указанной категории
-                    section = next((s for s in digest["sections"] if s["category"] == category), None)
-                    
-                    if not section:
-                        await query.message.reply_text(f"Категория '{category}' не найдена в дайджесте.")
-                        return
-                    
-                    # Отправляем секцию
-                    from utils.text_utils import TextUtils
-                    safe_text = TextUtils.clean_markdown_text(section["text"])
-                    chunks = TextUtils.split_text(safe_text)
-                    
-                    header = f"Дайджест от {digest['date'].strftime('%d.%m.%Y')} - категория: {category}"
-                    
-                    for i, chunk in enumerate(chunks):
-                        if i == 0:
-                            text_html = TextUtils.convert_to_html(chunk)
-                            await query.message.reply_text(f"{header}\n\n{text_html}", parse_mode='HTML')
-                        else:
-                            await query.message.reply_text(TextUtils.convert_to_html(chunk), parse_mode='HTML')
-            except Exception as e:
-                logger.error(f"Ошибка при показе категории: {str(e)}")
-                await query.message.reply_text(f"Произошла ошибка при показе категории: {str(e)}")
+
         
         # Обработка для возврата к списку дайджестов
-        elif query.data == "back_to_digest_list" or query.data == "show_digests_list":
+        elif query.data == "sl":
             try:
                 # Используем доработанную команду list_digests_command
                 await list_digests_command(update, context, db_manager)
@@ -652,15 +604,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, db
         elif query.data.startswith("select_digest_"):
             try:
                 digest_id = int(query.data.replace("select_digest_", ""))
-                digest = db_manager.get_digest_by_id_with_sections(digest_id)
-                
-                if digest:
-                    # Перенаправляем на просмотр дайджеста
-                    modified_query = query
-                    modified_query.data = f"view_digest_{digest_id}"
-                    await view_digest_callback(update, context, db_manager)
-                else:
-                    await query.message.reply_text("Дайджест не найден или был удален.")
+                # Теперь вызываем show_digest_categories, которая покажет категории этого дайджеста
+                await show_digest_categories(query.message, digest_id, db_manager)
             except Exception as e:
                 logger.error(f"Ошибка при выборе дайджеста: {str(e)}")
                 await query.message.reply_text(f"Произошла ошибка при выборе дайджеста: {str(e)}")
