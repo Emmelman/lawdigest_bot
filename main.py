@@ -20,6 +20,9 @@ from telethon import TelegramClient
 # Импорт компонентов workflow
 from llm.qwen_model import QwenLLM
 from llm.gemma_model import GemmaLLM
+from agents.orchestrator import OrchestratorAgent
+from agents.agent_registry import AgentRegistry
+from agents.task_queue import TaskQueue
 from agents.critic import CriticAgent
 
 # Загрузка переменных окружения
@@ -148,8 +151,51 @@ async def create_digest(db_manager, llm_model, days_back=1):
     
     logger.info(f"Дайджест создан: {digest.get('status', 'unknown')}")
     return digest
-
-# Обновление в main.py
+ 
+ # Обновление в main.py
+async def run_orchestrated_workflow(scenario: str = "daily_workflow", **kwargs):
+    """Запуск рабочего процесса через оркестратор"""
+    logger.info(f"Запуск оркестрированного рабочего процесса: {scenario}")
+    
+    # Инициализация компонентов
+    db_manager = DatabaseManager(DATABASE_URL)
+    agent_registry = AgentRegistry(db_manager)
+    orchestrator = OrchestratorAgent(db_manager, agent_registry)
+    
+    try:
+        # Запускаем планирование и выполнение
+        result = await orchestrator.plan_and_execute(scenario, **kwargs)
+        
+        # Выводим результаты
+        logger.info("=== РЕЗУЛЬТАТЫ ВЫПОЛНЕНИЯ ===")
+        logger.info(f"Статус: {result.get('status')}")
+        logger.info(f"Сценарий: {result.get('metrics', {}).get('scenario')}")
+        logger.info(f"Успешность: {result.get('metrics', {}).get('success_rate', 0):.1%}")
+        logger.info(f"Время выполнения: {result.get('metrics', {}).get('total_execution_time', 0):.1f}с")
+        
+        summary = result.get('summary', {})
+        logger.info(f"Собрано сообщений: {summary.get('collected_messages', 0)}")
+        logger.info(f"Проанализировано: {summary.get('analyzed_messages', 0)}")
+        logger.info(f"Улучшено критиком: {summary.get('reviewed_messages', 0)}")
+        logger.info(f"Создано дайджестов: {len(summary.get('created_digests', []))}")
+        logger.info(f"Обновлено дайджестов: {len(summary.get('updated_digests', []))}")
+        
+        # Выводим рекомендации
+        recommendations = result.get('recommendations', [])
+        if recommendations:
+            logger.info("=== РЕКОМЕНДАЦИИ ===")
+            for rec in recommendations:
+                logger.info(f"- {rec.get('description')}")
+        
+        return result.get('status') == 'success'
+        
+    except Exception as e:
+        logger.error(f"Ошибка при выполнении оркестрированного процесса: {str(e)}")
+        return False
+    finally:
+        # Закрываем соединения
+        session_manager = TelegramSessionManager(api_id=TELEGRAM_API_ID, api_hash=TELEGRAM_API_HASH)
+        await session_manager.close_all_clients()
 
 async def run_full_workflow(days_back=1, force_update=False):
     """Запуск полного рабочего процесса с уверенностью и оптимизацией"""
@@ -343,10 +389,17 @@ def main():
     parser = argparse.ArgumentParser(description='Запуск приложения в различных режимах')
     parser.add_argument('--mode', choices=['bot', 'workflow', 'digest'], default='bot',
                         help='Режим работы: bot - запуск бота и планировщика, '
-                             'workflow - запуск полного рабочего процесса, '
-                             'digest - только формирование дайджеста')
+                              'workflow - запуск полного рабочего процесса, '
+                              'digest - только формирование дайджеста')
+    parser.add_argument('--orchestrator', action='store_true', 
+                        help='Использовать оркестратор для режима workflow')
+    parser.add_argument('--scenario', default='daily_workflow',
+                        choices=['daily_workflow', 'urgent_update', 'full_analysis', 'digest_only'],
+                        help='Сценарий выполнения для оркестратора')
     parser.add_argument('--days', type=int, default=1, 
                         help='Количество дней для сбора сообщений (режимы workflow и digest)')
+    parser.add_argument('--force-update', action='store_true',
+                        help='Принудительное обновление данных')
     
     args = parser.parse_args()
     
@@ -355,7 +408,14 @@ def main():
     if args.mode == 'bot':
         run_bot_with_scheduler()
     elif args.mode == 'workflow':
-        asyncio.run(run_full_workflow(days_back=args.days))
+        if args.orchestrator:
+            asyncio.run(run_orchestrated_workflow(
+                scenario=args.scenario, 
+                days_back=args.days,
+                force_update=args.force_update
+            ))
+        else:
+            asyncio.run(run_full_workflow(days_back=args.days, force_update=args.force_update))
     elif args.mode == 'digest':
         db_manager = DatabaseManager(DATABASE_URL)
         gemma_model = GemmaLLM()

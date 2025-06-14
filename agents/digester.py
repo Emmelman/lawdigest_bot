@@ -960,10 +960,20 @@ class DigesterAgent:
         Returns:
             dict: Результаты обновления
         """
-        logger.info(f"Обновление дайджестов, содержащих дату {date.strftime('%Y-%m-%d')}")
+        # Нормализуем дату
+        if hasattr(date, 'date'):
+            # Это datetime объект
+            date_for_search = date
+            date_str = date.strftime('%Y-%m-%d')
+        else:
+            # Это уже date объект
+            date_for_search = datetime.combine(date, datetime.min.time())
+            date_str = date.strftime('%Y-%m-%d')
+            
+        logger.info(f"Обновление дайджестов, содержащих дату {date_str}")
         
-        # Найти все дайжесты, которые содержат данную дату
-        digests = self.db_manager.get_digests_containing_date(date)
+        # Найти все дайджесты, которые содержат данную дату
+        digests = self.db_manager.get_digests_containing_date(date_for_search)
         
         if not digests:
             # Для текущего дня проверяем дайджесты с флагом is_today

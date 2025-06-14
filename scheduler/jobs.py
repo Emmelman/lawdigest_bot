@@ -17,6 +17,9 @@ from agents.data_collector import DataCollectorAgent
 from agents.analyzer import AnalyzerAgent
 from agents.digester import DigesterAgent
 from apscheduler.executors.asyncio import AsyncIOExecutor # Added import for AsyncIOExecutor
+from agents.orchestrator import OrchestratorAgent
+from agents.agent_registry import AgentRegistry
+from agents.task_queue import TaskQueue
 from crewai import Crew
 
 logger = logging.getLogger(__name__)
@@ -26,7 +29,7 @@ class JobScheduler:
     
     def __init__(self, db_manager, crew=None):
         """
-        Инициализация планировщика
+        Инициализация планировщика с поддержкой оркестратора
         
         Args:
             db_manager (DatabaseManager): Менеджер БД
@@ -34,6 +37,12 @@ class JobScheduler:
         """
         self.db_manager = db_manager # The db_manager is passed to agents, not crew itself
         self.scheduler = BackgroundScheduler()
+        
+        # Инициализация оркестратора
+        self.agent_registry = AgentRegistry(db_manager)
+        self.orchestrator = OrchestratorAgent(db_manager, self.agent_registry)
+        self.task_queue = TaskQueue(max_concurrent_tasks=2)
+        self.use_orchestrator = True  # Флаг использования оркестратора
         
         # Создаем агентов
         self.data_collector = DataCollectorAgent(db_manager)
@@ -59,6 +68,27 @@ class JobScheduler:
                 verbose=True
             )
     
+    async def orchestrated_collect_data_job(self):
+        """Задача сбора данных через оркестратор"""
+        logger.info("Запуск оркестрированной задачи сбора данных")
+        try:
+            result = await self.orchestrator.plan_and_execute(
+                scenario="urgent_update",
+                days_back=1,
+                force_update=False
+            )
+            logger.info(f"Оркестрированная задача сбора данных завершена: {result.get('status')}")
+            
+            # Логируем основные метрики
+            metrics = result.get('metrics', {})
+            summary = result.get('summary', {})
+            logger.info(f"Успешность: {metrics.get('success_rate', 0):.1%}, "
+                       f"собрано: {summary.get('collected_messages', 0)}, "
+                       f"проанализировано: {summary.get('analyzed_messages', 0)}")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при выполнении оркестрированной задачи сбора данных: {str(e)}")
+    
     async def collect_data_job(self):
         """Задача сбора данных"""
         logger.info("Запуск задачи сбора данных")
@@ -76,6 +106,62 @@ class JobScheduler:
             logger.info("Задача анализа сообщений завершена")
         except Exception as e:
             logger.error(f"Ошибка при выполнении задачи анализа сообщений: {str(e)}")
+    
+    async def orchestrated_daily_workflow_job(self):
+        """Ежедневная задача полного рабочего процесса через оркестратор"""
+        logger.info("Запуск ежедневного оркестрированного рабочего процесса")
+        try:
+            result = await self.orchestrator.plan_and_execute(
+                scenario="daily_workflow",
+                days_back=1,
+                force_update=True
+            )
+            
+            logger.info(f"Ежедневный рабочий процесс завершен: {result.get('status')}")
+            
+            # Детальное логирование результатов
+            self._log_workflow_results(result)
+            
+        except Exception as e:
+            logger.error(f"Ошибка при выполнении ежедневного рабочего процесса: {str(e)}")
+    
+    def _log_workflow_results(self, result: dict):
+        """Детальное логирование результатов рабочего процесса"""
+        try:
+            metrics = result.get('metrics', {})
+            summary = result.get('summary', {})
+            
+            logger.info("=== РЕЗУЛЬТАТЫ ЕЖЕДНЕВНОГО ПРОЦЕССА ===")
+            logger.info(f"Общий статус: {result.get('status')}")
+            logger.info(f"Время выполнения: {metrics.get('total_execution_time', 0):.1f}с")
+            logger.info(f"Успешных задач: {metrics.get('successful_tasks', 0)}/{metrics.get('total_tasks', 0)}")
+            
+            if summary.get('collected_messages', 0) > 0:
+                logger.info(f"Собрано новых сообщений: {summary['collected_messages']}")
+            
+            if summary.get('analyzed_messages', 0) > 0:
+                logger.info(f"Проанализировано сообщений: {summary['analyzed_messages']}")
+            
+            if summary.get('reviewed_messages', 0) > 0:
+                logger.info(f"Улучшено критиком: {summary['reviewed_messages']}")
+            
+            created_digests = summary.get('created_digests', [])
+            if created_digests:
+                logger.info(f"Созданы дайджесты: {', '.join(created_digests)}")
+            
+            updated_digests = summary.get('updated_digests', [])
+            if updated_digests:
+                logger.info(f"Обновлены дайджесты: {', '.join(updated_digests)}")
+            
+            # Логируем рекомендации
+            recommendations = result.get('recommendations', [])
+            if recommendations:
+                logger.info("Рекомендации:")
+                for rec in recommendations:
+                    logger.info(f"  - {rec.get('description')}")
+                    
+        except Exception as e:
+            logger.error(f"Ошибка при логировании результатов: {str(e)}")
     
     async def create_digest_job(self): # Made async because it calls an async method
         """Задача создания дайджеста"""
@@ -100,7 +186,16 @@ class JobScheduler:
         # Configure APScheduler to use AsyncIOExecutor
         self.scheduler.add_executor(AsyncIOExecutor, alias='asyncio', job_defaults={'max_instances': 1}) # Corrected argument passing
 
-        # Существующие задачи
+        # Выбираем версию задач в зависимости от настройки
+        if self.use_orchestrator:
+            self._setup_orchestrated_jobs()
+        else:
+            self._setup_legacy_jobs()
+        
+        logger.info(f"Задачи настроены ({'оркестратор' if self.use_orchestrator else 'стандартные'})")
+    
+    def _setup_legacy_jobs(self):
+        """Настройка стандартных задач (без оркестратора)"""
         self.scheduler.add_job(
             self.collect_data_job, # Now an async method
             IntervalTrigger(minutes=COLLECT_INTERVAL_MINUTES),
@@ -128,18 +223,41 @@ class JobScheduler:
             IntervalTrigger(minutes=ANALYZE_INTERVAL_MINUTES + 5),  # Запускаем чуть позже анализа
             id='update_digests'
         )
+    
+    def _setup_orchestrated_jobs(self):
+        """Настройка задач с использованием оркестратора"""
         
-        # Добавляем задачу обновления флагов is_today (каждый день в полночь + 1 минуту)
+        # Быстрые обновления каждые 30 минут
         self.scheduler.add_job(
-            self.update_today_flags_job,
-            CronTrigger(hour=0, minute=1),  # В 00:01 каждый день
-            id='update_today_flags'
+            self.orchestrated_collect_data_job,
+            IntervalTrigger(minutes=COLLECT_INTERVAL_MINUTES),
+            id='orchestrated_collect_data'
         )
         
-        # Также выполняем обновление флагов при запуске
-        self.update_today_flags_job()
+        # Полный ежедневный процесс
+        from apscheduler.triggers.cron import CronTrigger
+        digest_time = time(hour=DIGEST_TIME_HOUR, minute=DIGEST_TIME_MINUTE)
+        self.scheduler.add_job(
+            self.orchestrated_daily_workflow_job,
+            CronTrigger(hour=digest_time.hour, minute=digest_time.minute),
+            id='orchestrated_daily_workflow'
+        )
         
-        logger.info("Задачи настроены")
+        # Дополнительный полный анализ в середине дня (опционально)
+        self.scheduler.add_job(
+            lambda: asyncio.create_task(self.orchestrator.plan_and_execute(
+                scenario="full_analysis", days_back=1, force_update=False
+            )),
+            CronTrigger(hour=14, minute=0),  # В 14:00
+            id='orchestrated_midday_analysis'
+        )
+        
+        # Задача обновления дайджестов остается общей
+        self.scheduler.add_job(
+            self.update_digests_job,
+            IntervalTrigger(minutes=ANALYZE_INTERVAL_MINUTES + 5),  # Запускаем чуть позже анализа
+            id='update_digests'
+        )
 
     def update_today_flags_job(self):
         """Задача обновления флагов is_today"""
@@ -156,6 +274,14 @@ class JobScheduler:
     def start(self):
         """Запуск планировщика"""
         self.setup_jobs()
+        
+        # Запускаем очередь задач если используется оркестратор
+        if self.use_orchestrator:
+            asyncio.create_task(self.task_queue.start_processing(
+                self.orchestrator._execute_single_task
+            ))
+            logger.info("Запущена очередь задач оркестратора")
+        
         self.scheduler.start()
         logger.info("Планировщик запущен")
     
@@ -163,6 +289,21 @@ class JobScheduler:
         """Остановка планировщика"""
         self.scheduler.shutdown()
         logger.info("Планировщик остановлен")
+        
+        # Останавливаем очередь задач если используется оркестратор
+        if self.use_orchestrator:
+            asyncio.create_task(self.task_queue.stop_processing())
+            logger.info("Остановлена очередь задач оркестратора")
+    
+    def toggle_orchestrator(self, enabled: bool):
+        """Переключение режима оркестратора"""
+        if self.use_orchestrator != enabled:
+            logger.info(f"Переключение оркестратора: {self.use_orchestrator} -> {enabled}")
+            self.use_orchestrator = enabled
+            
+            # Пересоздаем задачи
+            self.scheduler.remove_all_jobs()
+            self.setup_jobs()
     
     def update_digests_job(self):
         """Задача обновления дайджестов при получении новых сообщений"""
