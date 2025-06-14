@@ -47,4 +47,7 @@ def setup_logging():
     logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)
     logging.getLogger('telethon').setLevel(logging.WARNING)
     
+    # Установите уровень для других логгеров CrewAI
+    logging.getLogger('crewai').setLevel(logging.INFO)
+    
     return root_logger

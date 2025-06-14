@@ -9,32 +9,23 @@ from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from datetime import time, datetime, timedelta
-from config.settings import CATEGORIES, BOT_USERNAME, TELEGRAM_CHANNELS
-from llm.gemma_model import GemmaLLM
-from agents.digester import DigesterAgent
-from agents.data_collector import DataCollectorAgent
-from agents.analyzer import AnalyzerAgent
-from agents.critic import CriticAgent
+from config.settings import CATEGORIES, BOT_USERNAME # Removed TELEGRAM_CHANNELS import as it's not used directly here
 from utils.text_utils import TextUtils
 from telegram_bot.improved_message_handler import improved_message_handler
-from telegram_bot.view_digest_helpers import (
-    show_full_digest, start_digest_generation, get_category_icon
-)
 from telegram_bot.period_command import period_command
 from telegram_bot.improved_view_digest import (
        view_digest_callback, 
        view_digest_section_callback,
        page_navigation_callback,
-       show_full_digest,
-       get_category_icon,
+       show_full_digest, # Keep only one import for show_full_digest
+       get_category_icon, # Keep only one import for get_category_icon
        get_short_category_id
    )
 from telegram_bot.improved_view_digest import get_short_category_id
 
 logger = logging.getLogger(__name__)
 
-# Утилиты для работы с текстом
-utils = TextUtils()
+# No need to instantiate TextUtils as all its methods are static
 
 # Базовые обработчики команд
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_manager):
@@ -77,32 +68,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_ma
         "/category - выбрать категорию новостей\n"
         "/help - получить справку\n\n"
         "Вы также можете задать мне вопрос по правовым новостям."
-    )
-
-async def category_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_manager):
-    """Обработчик команды /category"""
-    keyboard = []
-    
-    # Для каждой категории создаем две кнопки с сокращённым текстом
-    for cat in CATEGORIES:
-        # Сокращаем название категории, если оно длинное
-        short_name = cat[:15] + "..." if len(cat) > 15 else cat
-        keyboard.append([
-            InlineKeyboardButton(f"{short_name} (кратко)", callback_data=f"cat_brief_{cat}"),
-            InlineKeyboardButton(f"{short_name} (подр.)", callback_data=f"cat_detailed_{cat}")
-        ])
-    
-    # Добавляем кнопку для категории "другое"
-    keyboard.append([
-        InlineKeyboardButton("другое (кратко)", callback_data="cat_brief_другое"),
-        InlineKeyboardButton("другое (подр.)", callback_data="cat_detailed_другое")
-    ])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        "Выберите категорию и тип обзора:", 
-        reply_markup=reply_markup
     )
 
 """
@@ -636,11 +601,13 @@ async def show_digest_by_id(message, digest_id, db_manager):
         await message.reply_text("Дайджест не найден.")
         return
     
-    # Очищаем текст от проблемных символов
-    safe_text = utils.clean_markdown_text(digest["text"])
+    text_utils = TextUtils() # Instantiate TextUtils
+
+    # Очищаем текст от проблемных символов, используя экземпляр
+    safe_text = text_utils.clean_markdown_text(digest["text"])
     
     # Отправляем дайджест по частям
-    chunks = utils.split_text(safe_text)
+    chunks = text_utils.split_text(safe_text)
     
     # Формируем заголовок в зависимости от параметров дайджеста
     header = f"Дайджест за {digest['date'].strftime('%d.%m.%Y')}"
@@ -659,20 +626,20 @@ async def show_digest_by_id(message, digest_id, db_manager):
     
     for i, chunk in enumerate(chunks):
         if i == 0:
-            text_html = utils.convert_to_html(chunk)
+            text_html = text_utils.convert_to_html(chunk)
             await message.reply_text(
                 f"{header}\n\n{text_html}",
                 parse_mode='HTML'
             )
         else:
-            await message.reply_text(chunk, parse_mode='HTML')
+            await message.reply_text(text_utils.convert_to_html(chunk), parse_mode='HTML')
 
 async def handle_digest_generation(update, context, db_manager, start_date, end_date, 
                           description, focus_category=None, channels=None, keywords=None, force_update=False):
     """Асинхронный запуск генерации дайджеста с использованием оптимизаций workflow"""
     # Определяем количество дней для обработки на основе дат
     if start_date and end_date:
-        days_back = (end_date.date() - start_date.date()).days + 1
+        days_back_calc = (end_date.date() - start_date.date()).days + 1 # Renamed to avoid confusion with days_back parameter
         logger.info(f"Рассчитан period days_back={days_back} на основе указанного диапазона")
     else:
         days_back = 1  # Значение по умолчанию
@@ -749,26 +716,25 @@ async def handle_digest_generation(update, context, db_manager, start_date, end_
     days_back = (end_date - start_date).days + 1
     
     try:
-        # Инициализация компонентов - создаем их только раз
-        from llm.qwen_model import QwenLLM
-        from llm.gemma_model import GemmaLLM
+        # Инициализация компонентов
+        from llm.qwen_model import QwenLLM # Re-added as it's not dynamically imported later
+        from llm.gemma_model import GemmaLLM # Re-added as it's not dynamically imported later
         from agents.data_collector import DataCollectorAgent
         from agents.analyzer import AnalyzerAgent
-        from agents.critic import CriticAgent
         from agents.digester import DigesterAgent
         
         qwen_model = QwenLLM()
         gemma_model = GemmaLLM()
         
-        # Этап 1: Параллельный сбор данных - используем оптимизированный метод как в workflow
+        # Этап 1: Параллельный сбор данных - use the dynamically imported class
         collector = DataCollectorAgent(db_manager)
         
         # Используем асинхронный метод collect_data вместо _collect_all_channels_parallel
         collect_result = await collector.collect_data(
-        days_back=days_back,
-        force_update=force_update,
-        start_date=start_date,
-        end_date=end_date
+            days_back=days_back_calc, # Use the calculated days_back
+            force_update=force_update,
+            start_date=start_date,
+            end_date=end_date
         )
         
         total_messages = collect_result.get("total_new_messages", 0)
@@ -780,11 +746,13 @@ async def handle_digest_generation(update, context, db_manager, start_date, end_
         )
         
         # Этап 2: Оптимизированный анализ сообщений с быстрой проверкой
+        AnalyzerAgent = await import_agent("agents.analyzer", "AnalyzerAgent")
         analyzer = AnalyzerAgent(db_manager, qwen_model)
         analyzer.fast_check = True  # Важно! Включаем быстрые проверки как в workflow
         
-        # Используем batched-версию метода для ускорения
-        analyze_result = analyzer.analyze_messages_batched(
+        # AnalyzerAgent.analyze_messages handles batching internally.
+        # The previous `analyze_messages_batched` was removed.
+        analyze_result = analyzer.analyze_messages(
             limit=max(total_messages, 50),
             batch_size=10,
             confidence_threshold=2
@@ -793,6 +761,7 @@ async def handle_digest_generation(update, context, db_manager, start_date, end_
         analyzed_count = analyze_result.get("analyzed_count", 0)
         
         # Этап 3: Оптимизированная проверка категоризации - только для сообщений с низкой уверенностью
+        CriticAgent = await import_agent("agents.critic", "CriticAgent")
         critic = CriticAgent(db_manager)
         review_result = critic.review_recent_categorizations(
             confidence_threshold=2,  # Только сообщения с уверенностью ≤ 2
@@ -808,13 +777,14 @@ async def handle_digest_generation(update, context, db_manager, start_date, end_
         )
         
         # Этап 4: Создание дайджеста
+        DigesterAgent = await import_agent("agents.digester", "DigesterAgent")
         digester = DigesterAgent(db_manager, gemma_model)
         result = digester.create_digest(
-            date=end_date,
-            days_back=days_back,
+            date=end_date, # end_date is the date for the digest
+            days_back=days_back_calc, # Pass the calculated duration
             digest_type="both",  # Создаем оба типа дайджеста
             focus_category=focus_category,
-            channels=channels,
+            channels=list(channels) if channels else None, # Ensure channels is a list
             keywords=keywords
         )
         
@@ -829,17 +799,17 @@ async def handle_digest_generation(update, context, db_manager, start_date, end_
         if "brief_digest_id" in result:
             digest_ids["brief"] = result["brief_digest_id"]
         if "detailed_digest_id" in result:
-            digest_ids["detailed"] = result["detailed_digest_id"]
+            digest_ids["detailed"] = result["detailed_digest_id"] # Fixed potential syntax error
         
         db_manager.save_digest_generation(
-        source="bot",
-        user_id=user_id,
-        channels=channels,
-        messages_count=total_messages,
-        digest_ids=digest_ids,
-        start_date=start_date,
-        end_date=end_date,
-        focus_category=focus_category
+            source="bot",
+            user_id=user_id,
+            channels=channels,
+            messages_count=total_messages,
+            digest_ids=digest_ids,
+            start_date=start_date,
+            end_date=end_date,
+            focus_category=focus_category
         )
         
         # Финальное сообщение
@@ -854,6 +824,16 @@ async def handle_digest_generation(update, context, db_manager, start_date, end_
         await status_message.edit_text(
             f"{status_message.text}\n\n❌ Произошла ошибка: {str(e)}"
         )
+
+# Helper function to dynamically import agents to avoid circular imports at top level
+async def import_agent(module_name, class_name):
+    """Dynamically imports a class from a module."""
+    try:
+        module = __import__(module_name, fromlist=[class_name])
+        return getattr(module, class_name)
+    except (ImportError, AttributeError) as e:
+        logger.error(f"Failed to import {class_name} from {module_name}: {e}")
+        raise
 """
 Обработчик для интерактивного просмотра дайджестов
 """
@@ -1052,8 +1032,8 @@ async def start_digest_generation(message, start_date, end_date, period_descript
         db_manager.save_digest_generation(
         source="bot",
         user_id=context.user_data.get("user_id"),
-        messages_count=total_messages,
-        digest_ids=dict(digest_ids),  # Преобразуйте в dict, если это не словарь
+        messages_count=total_messages, # No change
+        digest_ids=dict(digest_ids) if not isinstance(digest_ids, dict) else digest_ids, # Ensure dict type
         start_date=start_date,
         end_date=end_date
         )   

@@ -16,6 +16,7 @@ from config.settings import (
 from agents.data_collector import DataCollectorAgent
 from agents.analyzer import AnalyzerAgent
 from agents.digester import DigesterAgent
+from apscheduler.executors.asyncio import AsyncIOExecutor # Added import for AsyncIOExecutor
 from crewai import Crew
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,7 @@ class JobScheduler:
             db_manager (DatabaseManager): Менеджер БД
             crew (Crew, optional): Экземпляр CrewAI для выполнения задач
         """
-        self.db_manager = db_manager
+        self.db_manager = db_manager # The db_manager is passed to agents, not crew itself
         self.scheduler = BackgroundScheduler()
         
         # Создаем агентов
@@ -39,7 +40,8 @@ class JobScheduler:
         self.analyzer = AnalyzerAgent(db_manager)
         self.digester = DigesterAgent(db_manager)
         
-        # Создаем или используем переданный экземпляр Crew
+        # For CrewAI, agents need to be initialized with their roles and tools
+        from crewai import Crew, Task # Local import to avoid circular dependency if agents used CrewAI
         if crew:
             self.crew = crew
         else:
@@ -52,7 +54,7 @@ class JobScheduler:
                 tasks=[
                     self.data_collector.create_task(),
                     self.analyzer.create_task(),
-                    self.digester.create_task()
+                    self.digester.create_task() # This task will likely be for the main digest creation
                 ],
                 verbose=True
             )
@@ -61,27 +63,25 @@ class JobScheduler:
         """Задача сбора данных"""
         logger.info("Запуск задачи сбора данных")
         try:
-            # Используйте loop.run_until_complete для корутин
-            loop = asyncio.get_event_loop()
-            result = loop.run_until_complete(self.data_collector.collect_data())
+            result = await self.data_collector.collect_data() # Now it's an async call
             logger.info(f"Задача сбора данных завершена: {result}")
         except Exception as e:
             logger.error(f"Ошибка при выполнении задачи сбора данных: {str(e)}")
     
-    def analyze_messages_job(self):
+    def analyze_messages_job(self): # This method is synchronous, no change needed for its own definition
         """Задача анализа сообщений"""
         logger.info("Запуск задачи анализа сообщений")
         try:
-            result = self.analyzer.analyze_messages()
-            logger.info(f"Задача анализа сообщений завершена: {result}")
+            self.analyzer.analyze_messages()
+            logger.info("Задача анализа сообщений завершена")
         except Exception as e:
             logger.error(f"Ошибка при выполнении задачи анализа сообщений: {str(e)}")
     
-    def create_digest_job(self):
+    async def create_digest_job(self): # Made async because it calls an async method
         """Задача создания дайджеста"""
         logger.info("Запуск задачи создания дайджеста")
-        try:
-            result = self.digester.create_digest()
+        try: 
+            result = self.digester.create_digest() # This is now awaited
             logger.info(f"Задача создания дайджеста завершена: {result}")
         except Exception as e:
             logger.error(f"Ошибка при выполнении задачи создания дайджеста: {str(e)}")
@@ -95,13 +95,14 @@ class JobScheduler:
         except Exception as e:
             logger.error(f"Ошибка при выполнении задач Crew: {str(e)}")
     
-    # В scheduler/jobs.py
-
     def setup_jobs(self):
         """Настройка расписания задач"""
+        # Configure APScheduler to use AsyncIOExecutor
+        self.scheduler.add_executor(AsyncIOExecutor, alias='asyncio', job_defaults={'max_instances': 1}) # Corrected argument passing
+
         # Существующие задачи
         self.scheduler.add_job(
-            self.collect_data_job,
+            self.collect_data_job, # Now an async method
             IntervalTrigger(minutes=COLLECT_INTERVAL_MINUTES),
             id='collect_data'
         )
@@ -113,9 +114,10 @@ class JobScheduler:
         )
         
         # Задача создания дайджеста (ежедневно в указанное время)
+        from apscheduler.triggers.cron import CronTrigger # Moved import here
         digest_time = time(hour=DIGEST_TIME_HOUR, minute=DIGEST_TIME_MINUTE)
         self.scheduler.add_job(
-            self.create_digest_job,
+            self.create_digest_job, # This should also be async or wrap async call
             CronTrigger(hour=digest_time.hour, minute=digest_time.minute),
             id='create_digest'
         )
@@ -169,8 +171,7 @@ class JobScheduler:
             # Определяем дату для обновления (обычно сегодня)
             today = datetime.now()
             
-            # Создаем агент-дайджестер
-            from agents.digester import DigesterAgent
+            # Agents are already initialized in __init__
             digester = DigesterAgent(self.db_manager)
             
             # Обновляем все дайджесты, содержащие сегодняшнюю дату
@@ -180,4 +181,4 @@ class JobScheduler:
             return result
         except Exception as e:
             logger.error(f"Ошибка при выполнении задачи обновления дайджестов: {str(e)}")
-            return {"status": "error", "error": str(e)}  
+            return {"status": "error", "error": str(e)}

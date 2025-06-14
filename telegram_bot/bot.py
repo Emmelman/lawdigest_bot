@@ -12,16 +12,16 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters
 )
-from config.settings import TELEGRAM_BOT_TOKEN
+from config.settings import TELEGRAM_BOT_TOKEN # Corrected from a circular import suggestion
 from telegram_bot.handlers import (
     start_command, help_command,
-    period_command, category_command, list_digests_command, category_selection_command, button_callback,
+    period_command, list_digests_command, category_selection_command, button_callback, # Removed category_command import
 )
-from telegram_bot.view_digest_helpers import (
-    show_full_digest, start_digest_generation, get_category_icon
+from telegram_bot.improved_view_digest import ( # Removed start_digest_generation from this import as it's defined in handlers.py
+    show_full_digest, get_category_icon
 )
 from telegram_bot.improved_message_handler import improved_message_handler
-from llm.gemma_model import GemmaLLM
+from llm.gemma_model import GemmaLLM # Corrected LLM import
 
 
 logger = logging.getLogger(__name__)
@@ -86,11 +86,13 @@ class TelegramBot:
                                 button_callback(update, context, self.db_manager))
         )
         
-        # Обработчик текстовых сообщений для ввода произвольного периода
-        #self.application.add_handler(
-         #   MessageHandler(filters.TEXT & ~filters.COMMAND, lambda update, context: 
-          #              message_handler(update, context, self.db_manager, self.llm_model))
-        #)
+        # Разкомментированный и исправленный обработчик текстовых сообщений
+        # improved_message_handler now needs db_manager and llm_model which are passed via bot_data
+        self.application.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, 
+                           lambda update, context: improved_message_handler(update, context, 
+                                                                           self.db_manager, self.llm_model))
+        )
     
     def run(self):
         """Запуск бота"""
@@ -98,6 +100,10 @@ class TelegramBot:
         
         # Создаем приложение
         self.application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        
+        # Прикрепляем db_manager и llm_model к bot_data для доступа в обработчиках
+        self.application.bot_data["db_manager"] = self.db_manager
+        self.application.bot_data["llm_model"] = self.llm_model
         
         # Настраиваем команды для меню бота
         commands = [

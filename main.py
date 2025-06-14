@@ -1,7 +1,7 @@
 """
 Главный файл приложения
 """
-import logging
+import logging # Keep logging import
 import threading
 import asyncio
 import argparse
@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from config.logging_config import setup_logging
 from config.settings import DATABASE_URL, TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_CHANNELS
 from database.db_manager import DatabaseManager
+from utils.telegram_session_manager import TelegramSessionManager # Import the session manager
 from telegram_bot.bot import TelegramBot
 from scheduler.jobs import JobScheduler
 from telethon import TelegramClient
@@ -22,6 +23,8 @@ from llm.gemma_model import GemmaLLM
 from agents.critic import CriticAgent
 
 # Загрузка переменных окружения
+logger = logging.getLogger(__name__) # Added logger definition
+
 load_dotenv()
 
 # Настройка логирования
@@ -153,14 +156,11 @@ async def run_full_workflow(days_back=1, force_update=False):
     logger.info(f"Запуск оптимизированного рабочего процесса за последние {days_back} дней...")
     
     # Инициализация компонентов
-    db_manager = DatabaseManager(DATABASE_URL)
+    db_manager = DatabaseManager(DATABASE_URL) # Initialize DB Manager
     qwen_model = QwenLLM()
     gemma_model = GemmaLLM()
     
-    # Создаем клиент Telegram
-    client = TelegramClient('workflow_session', TELEGRAM_API_ID, TELEGRAM_API_HASH)
-    await client.start()
-    
+    # Create DataCollectorAgent with the db_manager
     try:
         # Шаг 1: Параллельный сбор данных
         logger.info("Шаг 1: Параллельный сбор данных")
@@ -173,6 +173,7 @@ async def run_full_workflow(days_back=1, force_update=False):
         
         logger.info(f"Всего собрано {total_messages} новых сообщений")
         
+        # If no new messages, check existing ones for uncategorized
         if total_messages == 0:
             logger.info("Нет новых сообщений. Проверка существующих сообщений за указанный период...")
             
@@ -196,6 +197,7 @@ async def run_full_workflow(days_back=1, force_update=False):
                 logger.info(f"Найдено {len(uncategorized)} некатегоризированных сообщений. Запускаем анализ...")
                 
                 # Запускаем категоризацию для некатегоризированных сообщений
+                from agents.analyzer import AnalyzerAgent # Import AnalyzerAgent for this specific use
                 analyzer = AnalyzerAgent(db_manager, qwen_model)
                 analyzer.fast_check = True
                 analyze_result = analyzer.analyze_messages(limit=len(uncategorized))
@@ -206,7 +208,7 @@ async def run_full_workflow(days_back=1, force_update=False):
         
         # Шаг 2: Анализ сообщений
         logger.info("Шаг 2: Анализ сообщений с оценкой уверенности")
-        from agents.analyzer import AnalyzerAgent
+        from agents.analyzer import AnalyzerAgent # Ensure AnalyzerAgent is imported for regular use
         analyzer = AnalyzerAgent(db_manager, qwen_model)
         analyzer.fast_check = True  # Включаем быструю проверку
         analyze_result = analyzer.analyze_messages(
@@ -226,6 +228,7 @@ async def run_full_workflow(days_back=1, force_update=False):
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days_back)
 
+        from agents.critic import CriticAgent # Import CriticAgent for this specific use
         critic = CriticAgent(db_manager)
         review_result = critic.review_recent_categorizations(
             confidence_threshold=2,  # Проверять только сообщения с уверенностью 1-2
@@ -241,8 +244,9 @@ async def run_full_workflow(days_back=1, force_update=False):
         
         # Шаг 4: Создание дайджеста
         logger.info("Шаг 4: Создание дайджеста")
-        from agents.digester import DigesterAgent
+        from agents.digester import DigesterAgent # Import DigesterAgent for this specific use
         digester = DigesterAgent(db_manager, gemma_model)
+        # This method is now async
         digest_result = digester.create_digest(days_back=days_back)
         
         has_brief = "brief_digest_id" in digest_result
@@ -276,27 +280,24 @@ async def run_full_workflow(days_back=1, force_update=False):
         
         
     finally:
-        # Закрываем соединение с Telegram
-        await client.disconnect()
-async def shutdown(signal, loop, client=None, scheduler=None, bot=None):
+        # Ensure all Telegram clients are released by the session manager
+        # This relies on the global singleton TelegramSessionManager instance
+        session_manager = TelegramSessionManager(api_id=TELEGRAM_API_ID, api_hash=TELEGRAM_API_HASH)
+        await session_manager.close_all_clients() # Call the new method
+
+async def shutdown(signal, loop, scheduler=None, bot=None): # Removed client=None as it's managed by session_manager
     """Корректное завершение приложения с закрытием всех подключений"""
     logger.info(f"Получен сигнал {signal.name}, завершение работы...")
     
     # Сначала останавливаем планировщик если он существует
     if scheduler:
         logger.info("Останавливаем планировщик...")
-        scheduler.stop()
+        scheduler.stop() # This calls scheduler.shutdown()
     
     # Останавливаем бота если он существует
     if bot and hasattr(bot, 'application'):
         logger.info("Останавливаем Telegram бота...")
         await bot.application.stop()
-    
-    # Корректно закрываем Telethon клиент
-    if client:
-        logger.info("Закрываем подключение к Telegram API...")
-        # Важно использовать await для корректного закрытия
-        await client.disconnect()
     
     # Отмена всех задач
     tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
@@ -312,7 +313,7 @@ async def shutdown(signal, loop, client=None, scheduler=None, bot=None):
     
 def run_bot_with_scheduler():
     """Запуск бота с планировщиком задач"""
-    logger.info("Запуск приложения в режиме бота с планировщиком")
+    logger.info("Запуск приложения в режиме Telegram бота с планировщиком")
     
     # Инициализация менеджера БД
     db_manager = DatabaseManager(DATABASE_URL)
@@ -325,12 +326,17 @@ def run_bot_with_scheduler():
     logger.info("Планировщик запущен в отдельном потоке")
     
     # Инициализация и запуск Telegram-бота
-    bot = TelegramBot(db_manager)
+    bot = TelegramBot(db_manager) # Pass db_manager
     bot.run()
     
     # Этот код не будет достигнут, пока бот работает
     logger.info("Приложение завершает работу")
     scheduler.stop()
+    
+    # Clean up Telethon session file on shutdown
+    session_manager = TelegramSessionManager(api_id=TELEGRAM_API_ID, api_hash=TELEGRAM_API_HASH)
+    asyncio.run(session_manager.disconnect_client()) # Ensure the client is disconnected
+    
 
 def main():
     """Точка входа в приложение"""

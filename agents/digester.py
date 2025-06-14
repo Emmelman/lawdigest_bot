@@ -3,14 +3,12 @@
 """
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from crewai import Agent, Task
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config.settings import CATEGORIES, BOT_USERNAME
-from database.db_manager import DatabaseManager
 from llm.gemma_model import GemmaLLM
 from langchain.tools import Tool
-from datetime import datetime, time, timedelta
 logger = logging.getLogger(__name__)
 
 class DigesterAgent:
@@ -681,12 +679,12 @@ class DigesterAgent:
         if not messages:
             logger.warning("Не найдено сообщений с указанными фильтрами, пробуем получить все сообщения за период")
             
-            # Пробуем получить любые сообщения за этот период
-            all_messages = self.db_manager.get_messages_by_date_range(start_date, end_date)
+            # Пробуем получить любые сообщения за этот период через get_filtered_messages для полноты
+            all_messages_result = self.db_manager.get_filtered_messages(start_date, end_date)
             
-            if all_messages:
-                logger.info(f"Найдено {len(all_messages)} сообщений без применения фильтров")
-                messages = all_messages
+            if all_messages_result and all_messages_result.get("messages"):
+                logger.info(f"Найдено {len(all_messages_result['messages'])} сообщений без применения фильтров")
+                messages = all_messages_result['messages']
             else:
                 logger.info("Сообщения за указанный период не найдены, запускаем сбор из Telegram...")
                 from agents.data_collector import DataCollectorAgent

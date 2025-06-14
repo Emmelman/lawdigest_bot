@@ -26,8 +26,7 @@ class CriticAgent:
         self.db_manager = db_manager
         
         # Импорт здесь, чтобы избежать циклических импортов
-        from llm.gemma_model import GemmaLLM
-        self.llm_model = llm_model or GemmaLLM()
+        from llm.gemma_model import GemmaLLM # Changed to lazy import
         
         # Инициализируем менеджер обучающих примеров
         self.learning_manager = LearningExamplesManager()
@@ -48,6 +47,7 @@ class CriticAgent:
             verbose=True,
             tools=[review_tool]
         )
+        self.llm_model = llm_model or GemmaLLM() # Initialize after lazy import
     def _save_learning_example(self, text, category, justification):
         """Сохраняет примеры для обучения аналитика"""
         try:
@@ -60,21 +60,6 @@ class CriticAgent:
             logger.error(f"Не удалось сохранить обучающий пример: {str(e)}")
             return False
         
-    def review_categorization_batch(self, messages_batch):
-        """
-        Обработка пакета сообщений
-        
-        Args:
-            messages_batch (list): Список сообщений для проверки
-            
-        Returns:
-            list: Результаты проверки
-        """
-        results = []
-        for message in messages_batch:
-            result = self.review_categorization(message.id, message.category)
-            results.append(result)
-        return results
     def get_message_by_id(self, message_id):
         """
         Получение сообщения по ID через менеджер БД
@@ -239,17 +224,15 @@ class CriticAgent:
         all_results = []
         # Используем ThreadPoolExecutor для параллельной обработки
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_batch = {
-                executor.submit(self.review_categorization_batch, batch): batch 
-                for batch in batches
-            }
+            future_to_message = {executor.submit(self.review_categorization, msg.id, msg.category): msg for msg_batch in batches for msg in msg_batch}
             
-            for future in concurrent.futures.as_completed(future_to_batch):
+            for future in concurrent.futures.as_completed(future_to_message):
+                message = future_to_message[future] # Это сообщение, а не пакет
                 try:
-                    batch_results = future.result()
-                    all_results.extend(batch_results)
+                    result = future.result()
+                    all_results.append(result)
                 except Exception as e:
-                    logger.error(f"Ошибка при обработке пакета сообщений: {str(e)}")
+                    logger.error(f"Ошибка при обработке сообщения {message.id}: {str(e)}")
         
         # Подсчет статистики
         updated = sum(1 for r in all_results if r.get("status") == "updated")
@@ -267,4 +250,3 @@ class CriticAgent:
             "errors": errors,
             "details": all_results
         }
-   

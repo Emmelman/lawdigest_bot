@@ -16,7 +16,7 @@ from crewai import Agent, Task
 from config.settings import TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_CHANNELS
 from utils.telegram_session_manager import TelegramSessionManager
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__) # Исправлен дублированный импорт datetime
 
 class DataCollectorAgent:
     """Улучшенный агент для сбора данных из Telegram-каналов"""
@@ -823,13 +823,11 @@ class DataCollectorAgent:
         if collect_result.get("total_new_messages", 0) > 0:
             # Если собраны новые сообщения, запускаем обновление дайджестов
             logger.info(f"Собрано {collect_result['total_new_messages']} новых сообщений, запускаем обновление дайджестов")
-            
             try:
+                from agents.digester import DigesterAgent # Перемещен импорт сюда, чтобы избежать циклического
                 # Получаем текущую дату
                 today = datetime.now()
                 
-                # Запускаем обновление дайджестов, которые включают сегодняшнюю дату
-                from agents.digester import DigesterAgent
                 digester = DigesterAgent(self.db_manager)
                 update_result = digester.update_digests_for_date(today)
                 

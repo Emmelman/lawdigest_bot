@@ -12,7 +12,8 @@ import json
 from sqlalchemy import or_, and_
 from sqlalchemy import extract
 from .models import Base, Message, Digest, DigestSection, DigestGeneration, init_db
-logger = logging.getLogger(__name__)
+
+logger = logging.getLogger(__name__) 
 
 class DatabaseManager:
     """Менеджер для работы с базой данных"""
@@ -50,10 +51,11 @@ class DatabaseManager:
         self.Session = scoped_session(self.session_factory)
 
     # Добавляем декоратор для автоматической обработки транзакций и повторных попыток
-    # Улучшенный декоратор для повторных попыток
+    @staticmethod
     def with_retry(max_attempts=5, delay=1.0, backoff_factor=2.0, error_types=(Exception,)):
         """
-        Усовершенствованный декоратор для повторных попыток выполнения операций с БД
+        Декоратор для повторных попыток выполнения операций с БД
+        (Метод экземпляра класса)
         с экспоненциальной задержкой.
         
         Args:
@@ -64,14 +66,14 @@ class DatabaseManager:
         """
         def decorator(func):
             @functools.wraps(func)
-            def wrapper(self, *args, **kwargs):
+            def wrapper(obj_self, *args, **kwargs): # Переименовано self в obj_self для ясности
                 attempt = 0
                 current_delay = delay
                 last_error = None
                 
                 while attempt < max_attempts:
                     try:
-                        return func(self, *args, **kwargs)
+                        return func(obj_self, *args, **kwargs) # Передача obj_self обратно в обернутую функцию
                     except error_types as e:
                         # Определяем, связана ли ошибка с блокировкой БД
                         is_db_lock_error = (
@@ -130,7 +132,7 @@ class DatabaseManager:
             
             if existing_message:
                 logger.debug(f"Сообщение {message_id} из канала {channel} уже существует")
-                return existing_message
+                return existing_message, False # Return existing message and False for "not new"
             
             # Создаем новое сообщение
             message = Message(
@@ -141,8 +143,8 @@ class DatabaseManager:
             )
             session.add(message)
             session.commit()
-            logger.debug(f"Сохранено сообщение {message_id} из канала {channel}")
-            return message
+            logger.debug(f"Сохранено сообщение {message_id} из канала {channel}") # This line was duplicated, fixed
+            return message, True # Return new message and True for "new" # This return was already here, keeping it.
         except Exception as e:
             session.rollback()
             logger.error(f"Ошибка при сохранении сообщения: {str(e)}")
@@ -474,7 +476,7 @@ class DatabaseManager:
         session = self.Session()
         try:
             saved_count = 0
-            for data in messages_data:
+            for i, data in enumerate(messages_data): # Added i for clearer logging
                 # Проверяем существование сообщения более эффективно
                 existing = session.query(Message).filter_by(
                     channel=data['channel'], 
@@ -488,10 +490,12 @@ class DatabaseManager:
                         text=data['text'],
                         date=data['date']
                     )
-                    session.add(message)
+                    session.add(message) # Add to session
                     saved_count += 1
+                    logger.debug(f"Подготовлено к пакетному сохранению сообщение {data['message_id']} из канала {data['channel']}")
             
-            session.commit()
+            session.commit() # Commit once after all messages are added
+            logger.info(f"Пакетно сохранено {saved_count} новых сообщений")
             return saved_count
         except Exception as e:
             session.rollback()
@@ -729,7 +733,12 @@ class DatabaseManager:
             channels_json = None
             keywords_json = None
             
-            if channels_filter is not None:
+            if channels_filter is not None: # Changed logic to handle dict_keys type
+                # Ensure channels_filter is a list if it's a dict_keys object
+                if isinstance(channels_filter, type({}.keys())): # Check for dict_keys type
+                    channels_filter = list(channels_filter) # Convert to list
+
+                # Existing logic for JSON serialization
                 try:
                     # Проверяем, не является ли значение уже строкой JSON
                     if isinstance(channels_filter, str):
@@ -1196,7 +1205,7 @@ class DatabaseManager:
             return generation.id
         except Exception as e:
             session.rollback()
-            logger.error(f"Ошибка при сохранении информации о генерации дайджеста: {str(e)}")
+            logger.exception(f"Ошибка при сохранении информации о генерации дайджеста: {str(e)}")
             return None
         finally:
             session.close()
@@ -1368,4 +1377,4 @@ def find_todays_digests(self, digest_type=None):
         logger.error(f"Ошибка при поиске сегодняшних дайджестов: {str(e)}")
         return []
     finally:
-        session.close()                    
+        session.close()

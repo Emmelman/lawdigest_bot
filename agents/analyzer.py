@@ -30,11 +30,6 @@ class AnalyzerAgent:
         # Инициализируем менеджер обучающих примеров
         self.learning_manager = LearningExamplesManager()
         
-        # Добавляем кэш примеров на уровне агента
-        self._examples_cache = None
-        self._examples_cache_timestamp = None
-        self._examples_cache_ttl = 1800  # 30 минут TTL для кэша
-
         # Создаем инструмент для анализа сообщений
         analyze_tool = Tool(
             name="analyze_messages",
@@ -62,23 +57,8 @@ class AnalyzerAgent:
         Returns:
             tuple: (категория сообщения, уровень уверенности 1-5)
         """
-        # Используем кэшированные примеры вместо обращения к менеджеру для каждого сообщения
-        current_time = dt.now()
-
-        # Инициализируем кэш, если он пустой
-        if self._examples_cache is None:
-            self._examples_cache = self.learning_manager.get_examples(limit=5)
-            self._examples_cache_timestamp = current_time
-            logger.debug("Инициализирован кэш примеров для классификации")
-        # Обновляем кэш, только если истек TTL
-        elif (current_time - self._examples_cache_timestamp).total_seconds() > self._examples_cache_ttl:
-            self._examples_cache = self.learning_manager.get_examples(limit=5)
-            self._examples_cache_timestamp = current_time
-            logger.debug("Обновлен кэш примеров для классификации")
-
-        # Используем кэшированные примеры
-        examples = self._examples_cache
-
+        # Всегда получаем примеры через LearningExamplesManager, он сам управляет кэшем
+        examples = self.learning_manager.get_examples(limit=5)
         # Формируем текст с примерами
         examples_text = ""
         if examples:
@@ -283,11 +263,11 @@ class AnalyzerAgent:
         successful_updates = []
         for result in all_results:
             if result["success"]:
-                success = self.db_manager.update_message_category(
-                    result["message_id"], 
-                    result["category"], 
-                    result["confidence"]
-                )
+                # update_message_category returns True/False
+                success = self.db_manager.update_message_category( 
+                    result["message_id"],
+                    result["category"],
+                    result["confidence"])
                 
                 if success:
                     categories_count[result["category"]] += 1
@@ -306,186 +286,6 @@ class AnalyzerAgent:
             "confidence_stats": confidence_stats,
             "all_results": all_results
         }
-    # В AnalyzerAgent:
-    def analyze_messages_batched(self, limit=500, batch_size=20, confidence_threshold=3):
-        """
-        Анализ сообщений большими партиями с приоритизацией
-        
-        Args:
-            limit (int): Максимальное количество сообщений для анализа
-            batch_size (int): Размер пакета для обработки
-            confidence_threshold (int): Пороговое значение уверенности для повторного анализа
-            
-        Returns:
-            dict: Результаты анализа
-        """
-        logger.info(f"Запуск анализа сообщений с оптимизацией, лимит: {limit}")
-       
-        # Предварительно загружаем примеры один раз для всех сообщений в пакете
-        current_time = dt.now()
-        if self._examples_cache is None or (current_time - self._examples_cache_timestamp).total_seconds() > self._examples_cache_ttl:
-            self._examples_cache = self.learning_manager.get_examples(limit=5) 
-            self._examples_cache_timestamp = current_time
-            logger.info("Загружены обучающие примеры для пакетного анализа")
-
-        # Получаем непроанализированные сообщения
-        unanalyzed = self.db_manager.get_unanalyzed_messages(limit=limit)
-        
-        if not unanalyzed:
-            logger.info("Нет новых сообщений для анализа")
-            
-            # Проверяем наличие сообщений с низкой уверенностью для повторного анализа
-            low_confidence = self.db_manager.get_messages_with_low_confidence(
-                confidence_threshold=confidence_threshold,
-                limit=min(limit, 50)  # Ограничиваем количество для повторного анализа
-            )
-            
-            if not low_confidence:
-                logger.info("Нет сообщений с низкой уверенностью для повторного анализа")
-                return {
-                    "status": "success",
-                    "analyzed_count": 0,
-                    "categories": {},
-                    "reanalyzed_count": 0
-                }
-            
-            logger.info(f"Найдено {len(low_confidence)} сообщений с низкой уверенностью для повторного анализа")
-            messages_to_analyze = low_confidence
-            is_reanalysis = True
-        else:
-            logger.info(f"Найдено {len(unanalyzed)} новых сообщений для анализа")
-            messages_to_analyze = unanalyzed
-            is_reanalysis = False
-        
-        # Разбиваем сообщения на пакеты
-        batches = [messages_to_analyze[i:i+batch_size] for i in range(0, len(messages_to_analyze), batch_size)]
-        
-        # Счетчики для статистики
-        categories_count = {category: 0 for category in CATEGORIES + ["другое"]}
-        confidence_stats = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
-        analyzed_count = 0
-        updated_count = 0
-        
-        # Обрабатываем пакеты параллельно
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            # Функция для обработки одного пакета
-            def process_batch(batch):
-                batch_results = []
-                for msg in batch:
-                    try:
-                        # Классифицируем сообщение
-                        category, confidence = self._classify_message(msg.text)
-                        
-                        # Если это повторный анализ и уверенность не улучшилась, пропускаем
-                        if is_reanalysis and confidence <= msg.confidence:
-                            batch_results.append({
-                                "message_id": msg.id,
-                                "status": "unchanged",
-                                "category": msg.category,
-                                "confidence": msg.confidence
-                            })
-                            continue
-                        
-                        # Обновляем категорию в БД
-                        success = self.db_manager.update_message_category(msg.id, category, confidence)
-                        
-                        if success:
-                            batch_results.append({
-                                "message_id": msg.id,
-                                "status": "updated" if is_reanalysis else "analyzed",
-                                "category": category,
-                                "confidence": confidence
-                            })
-                        else:
-                            batch_results.append({
-                                "message_id": msg.id,
-                                "status": "error",
-                                "error": "Не удалось обновить категорию"
-                            })
-                    except Exception as e:
-                        batch_results.append({
-                            "message_id": msg.id,
-                            "status": "error",
-                            "error": str(e)
-                        })
-                
-                return batch_results
-            
-            # Запускаем задачи
-            future_to_batch = {executor.submit(process_batch, batch): i for i, batch in enumerate(batches)}
-            
-            # Собираем результаты
-            all_results = []
-            for future in as_completed(future_to_batch):
-                batch_idx = future_to_batch[future]
-                try:
-                    batch_results = future.result()
-                    all_results.extend(batch_results)
-                    logger.info(f"Обработан пакет {batch_idx+1}/{len(batches)}: {len(batch_results)} сообщений")
-                except Exception as e:
-                    logger.error(f"Ошибка при обработке пакета {batch_idx+1}: {str(e)}")
-        
-        # Обрабатываем итоговые результаты
-        for result in all_results:
-            if result["status"] in ["analyzed", "updated"]:
-                category = result["category"]
-                confidence = result["confidence"]
-                
-                categories_count[category] += 1
-                confidence_stats[confidence] += 1
-                analyzed_count += 1
-                
-                if result["status"] == "updated":
-                    updated_count += 1
-        
-        logger.info(f"Анализ завершен. Проанализировано {analyzed_count} сообщений, обновлено {updated_count}")
-        logger.info(f"Распределение по категориям: {categories_count}")
-        logger.info(f"Распределение по уверенности: {confidence_stats}")
-        
-        return {
-            "status": "success",
-            "analyzed_count": analyzed_count,
-            "categories": categories_count,
-            "confidence_stats": confidence_stats,
-            "reanalyzed_count": updated_count if is_reanalysis else 0
-        }
-    # В методе _load_learning_examples в файле agents/analyzer.py:
-
-    def _load_learning_examples(self, limit=10):
-        """Загружает примеры для улучшения классификации с использованием кэша"""
-        # Если кэш уже существует и не устарел (менее 5 минут), используем его
-        current_time = dt.now()
-        if (self._examples_cache is not None and 
-            self._examples_cache_timestamp is not None and
-            (current_time - self._examples_cache_timestamp).total_seconds() < 300):
-            
-            logger.debug("Используем кэшированные примеры обучения")
-            return self._examples_cache[:limit]
-        
-        # Если кэш устарел или отсутствует, загружаем примеры с диска
-        self._examples_cache = self._load_learning_examples_from_disk(limit=20)
-        self._examples_cache_timestamp = current_time
-        
-        return self._examples_cache[:limit]
-    def _load_learning_examples_from_disk(self, limit=20):
-        """Непосредственная загрузка примеров с диска"""
-        examples_path = "learning_examples/examples.jsonl"
-        if not os.path.exists(examples_path):
-            logger.debug("Файл с обучающими примерами не найден")
-            return []
-        
-        examples = []
-        try:
-            with open(examples_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-                # Берем последние примеры, ограниченные лимитом
-                for line in lines[-limit:]:
-                    examples.append(json.loads(line))
-            logger.debug(f"Загружено {len(examples)} обучающих примеров")
-            return examples
-        except Exception as e:
-            logger.error(f"Ошибка при загрузке обучающих примеров: {str(e)}")
-            return []    
     def create_task(self):
         """
         Создание задачи для агента
@@ -498,5 +298,3 @@ class AnalyzerAgent:
             agent=self.agent,
             expected_output="Результаты анализа с информацией о количестве проанализированных сообщений и их категориях"
         )
-    
-    
