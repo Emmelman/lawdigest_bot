@@ -6,6 +6,7 @@ from datetime import datetime, time
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+#from apscheduler.executors.pool import ThreadPoolExecutor
 import asyncio
 from config.settings import (
     COLLECT_INTERVAL_MINUTES,
@@ -21,6 +22,7 @@ from agents.orchestrator import OrchestratorAgent
 from agents.agent_registry import AgentRegistry
 from agents.task_queue import TaskQueue
 from crewai import Crew
+
 
 logger = logging.getLogger(__name__)
 
@@ -50,23 +52,44 @@ class JobScheduler:
         self.digester = DigesterAgent(db_manager)
         
         # For CrewAI, agents need to be initialized with their roles and tools
+        # В scheduler/jobs.py, замените секцию инициализации Crew на:
+
+# For CrewAI, agents need to be initialized with their roles and tools
         from crewai import Crew, Task # Local import to avoid circular dependency if agents used CrewAI
         if crew:
             self.crew = crew
         else:
-            self.crew = Crew(
-                agents=[
-                    self.data_collector.agent,
-                    self.analyzer.agent,
-                    self.digester.agent
-                ],
-                tasks=[
-                    self.data_collector.create_task(),
-                    self.analyzer.create_task(),
-                    self.digester.create_task() # This task will likely be for the main digest creation
-                ],
-                verbose=True
-            )
+            # Создаем Crew только если все агенты правильно инициализированы
+            try:
+                # Проверяем, что у агентов есть необходимые атрибуты
+                if (hasattr(self.data_collector, 'agent') and 
+                    hasattr(self.analyzer, 'agent') and 
+                    hasattr(self.digester, 'agent') and
+                    hasattr(self.data_collector, 'create_task') and
+                    hasattr(self.analyzer, 'create_task') and
+                    hasattr(self.digester, 'create_task')):
+                    
+                    self.crew = Crew(
+                        agents=[
+                            self.data_collector.agent,
+                            self.analyzer.agent,
+                            self.digester.agent
+                        ],
+                        tasks=[
+                            self.data_collector.create_task(),
+                            self.analyzer.create_task(),
+                            self.digester.create_task()
+                        ],
+                        verbose=True
+                    )
+                else:
+                    # Если агенты не поддерживают CrewAI, используем None
+                    logger.warning("Агенты не поддерживают CrewAI интерфейс, Crew не инициализирована")
+                    self.crew = None
+                    
+            except Exception as e:
+                logger.warning(f"Ошибка при создании Crew: {str(e)}, используем legacy режим")
+                self.crew = None
     
     async def orchestrated_collect_data_job(self):
         """Задача сбора данных через оркестратор"""
@@ -183,15 +206,17 @@ class JobScheduler:
     
     def setup_jobs(self):
         """Настройка расписания задач"""
-        # Configure APScheduler to use AsyncIOExecutor
-        self.scheduler.add_executor(AsyncIOExecutor, alias='asyncio', job_defaults={'max_instances': 1}) # Corrected argument passing
-
+        logger.info("Настройка задач планировщика...")
+        
+        # УБИРАЕМ полностью AsyncIOExecutor - BackgroundScheduler его не поддерживает
+        # Все асинхронные задачи будем запускать через lambda с asyncio.run_coroutine_threadsafe
+        
         # Выбираем версию задач в зависимости от настройки
         if self.use_orchestrator:
             self._setup_orchestrated_jobs()
         else:
             self._setup_legacy_jobs()
-        
+    
         logger.info(f"Задачи настроены ({'оркестратор' if self.use_orchestrator else 'стандартные'})")
     
     def _setup_legacy_jobs(self):
@@ -226,38 +251,69 @@ class JobScheduler:
     
     def _setup_orchestrated_jobs(self):
         """Настройка задач с использованием оркестратора"""
+        logger.info("Настройка оркестрированных задач")
+        
+        # Функция-обертка для запуска async функций в BackgroundScheduler
+        def run_async_job(coro_func, *args, **kwargs):
+            """Запуск асинхронной функции в синхронном контексте"""
+            try:
+                # Создаем новый event loop для этого потока
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    result = loop.run_until_complete(coro_func(*args, **kwargs))
+                    return result
+                finally:
+                    loop.close()
+            except Exception as e:
+                logger.error(f"Ошибка при выполнении async задачи: {str(e)}")
         
         # Быстрые обновления каждые 30 минут
         self.scheduler.add_job(
-            self.orchestrated_collect_data_job,
-            IntervalTrigger(minutes=COLLECT_INTERVAL_MINUTES),
-            id='orchestrated_collect_data'
+            func=lambda: run_async_job(self.orchestrated_collect_data_job),
+            trigger=IntervalTrigger(minutes=COLLECT_INTERVAL_MINUTES),
+            id='orchestrated_collect_data',
+            name='Сбор данных через оркестратор',
+            max_instances=1,
+            coalesce=True
         )
         
         # Полный ежедневный процесс
-        from apscheduler.triggers.cron import CronTrigger
-        digest_time = time(hour=DIGEST_TIME_HOUR, minute=DIGEST_TIME_MINUTE)
         self.scheduler.add_job(
-            self.orchestrated_daily_workflow_job,
-            CronTrigger(hour=digest_time.hour, minute=digest_time.minute),
-            id='orchestrated_daily_workflow'
+            func=lambda: run_async_job(self.orchestrated_daily_workflow_job),
+            trigger=CronTrigger(hour=DIGEST_TIME_HOUR, minute=DIGEST_TIME_MINUTE),
+            id='orchestrated_daily_workflow',
+            name='Ежедневный оркестрированный процесс',
+            max_instances=1,
+            coalesce=True
         )
         
-        # Дополнительный полный анализ в середине дня (опционально)
+        # Дополнительный полный анализ в середине дня
         self.scheduler.add_job(
-            lambda: asyncio.create_task(self.orchestrator.plan_and_execute(
-                scenario="full_analysis", days_back=1, force_update=False
-            )),
-            CronTrigger(hour=14, minute=0),  # В 14:00
-            id='orchestrated_midday_analysis'
+            func=lambda: run_async_job(
+                self.orchestrator.plan_and_execute,
+                scenario="full_analysis", 
+                days_back=1, 
+                force_update=False
+            ),
+            trigger=CronTrigger(hour=14, minute=0),
+            id='orchestrated_midday_analysis',
+            name='Анализ в середине дня',
+            max_instances=1,
+            coalesce=True
         )
         
-        # Задача обновления дайджестов остается общей
+        # Задача обновления дайджестов (синхронная)
         self.scheduler.add_job(
-            self.update_digests_job,
-            IntervalTrigger(minutes=ANALYZE_INTERVAL_MINUTES + 5),  # Запускаем чуть позже анализа
-            id='update_digests'
+            func=self.update_digests_job,
+            trigger=IntervalTrigger(minutes=ANALYZE_INTERVAL_MINUTES + 5),
+            id='update_digests',
+            name='Обновление дайджестов',
+            max_instances=1,
+            coalesce=True
         )
+        
+        logger.info("Оркестрированные задачи настроены успешно")
 
     def update_today_flags_job(self):
         """Задача обновления флагов is_today"""
@@ -274,13 +330,11 @@ class JobScheduler:
     def start(self):
         """Запуск планировщика"""
         self.setup_jobs()
-        
-        # Запускаем очередь задач если используется оркестратор
+    
+        # ПРОСТОЕ РЕШЕНИЕ: Временно убираем запуск очереди задач
+        # Оркестратор будет работать через обычные scheduled задачи
         if self.use_orchestrator:
-            asyncio.create_task(self.task_queue.start_processing(
-                self.orchestrator._execute_single_task
-            ))
-            logger.info("Запущена очередь задач оркестратора")
+            logger.info("Оркестратор настроен, очередь задач будет запускаться по требованию")
         
         self.scheduler.start()
         logger.info("Планировщик запущен")
@@ -289,11 +343,6 @@ class JobScheduler:
         """Остановка планировщика"""
         self.scheduler.shutdown()
         logger.info("Планировщик остановлен")
-        
-        # Останавливаем очередь задач если используется оркестратор
-        if self.use_orchestrator:
-            asyncio.create_task(self.task_queue.stop_processing())
-            logger.info("Остановлена очередь задач оркестратора")
     
     def toggle_orchestrator(self, enabled: bool):
         """Переключение режима оркестратора"""
@@ -323,3 +372,35 @@ class JobScheduler:
         except Exception as e:
             logger.error(f"Ошибка при выполнении задачи обновления дайджестов: {str(e)}")
             return {"status": "error", "error": str(e)}
+    async def get_orchestrator_status(self):
+        """Получение статуса оркестратора"""
+        try:
+            if not self.use_orchestrator:
+                return {
+                    "enabled": False,
+                    "orchestrator": None,
+                    "agent_registry": None,
+                    "task_queue": None
+                }
+            
+            # Получаем статус агентов
+            agent_status = self.agent_registry.get_status() if self.agent_registry else {}
+            
+            # Получаем статус очереди задач
+            queue_status = await self.task_queue.get_status() if self.task_queue else {}
+            
+            return {
+                "enabled": True,
+                "orchestrator": {
+                    "initialized": self.orchestrator is not None,
+                    "agent_count": len(self.orchestrator.agent_registry.agents) if self.orchestrator and self.orchestrator.agent_registry else 0
+                },
+                "agent_registry": agent_status,
+                "task_queue": queue_status
+            }
+            
+        except Exception as e:
+            return {
+                "enabled": self.use_orchestrator,
+                "error": str(e)
+            }

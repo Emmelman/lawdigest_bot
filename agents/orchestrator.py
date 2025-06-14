@@ -307,7 +307,8 @@ class OrchestratorAgent:
                 "date": datetime.now().date(),
                 "digest_type": "brief"  # Только краткий для скорости
             },
-            dependencies=["message_analysis"] if context.get("unanalyzed_count", 0) > 0 else ["data_collection"]
+            dependencies=["message_analysis"] if context.get("unanalyzed_count", 0) > 0 else ["data_collection"],
+            timeout=120
         ))
         
         logger.info(f"Создан план urgent_update: {len(tasks)} задач")
@@ -615,10 +616,27 @@ class OrchestratorAgent:
                 lambda: agent.update_digests_for_date(date)
             )
             
-            updated_count = len(result.get("updated_digests", []))
-            logger.info(f"Обновление дайджестов завершено: {updated_count} дайджестов обновлено")
-            return result
+            # ИСПРАВЛЕНИЕ: Проверяем наличие обновленных дайджестов и формируем правильный статус
+            updated_digests = result.get("updated_digests", [])
+            updated_count = len(updated_digests)
             
+            if updated_count > 0:
+                # Если обновили дайджесты - это успех
+                logger.info(f"Обновление дайджестов завершено: {updated_count} дайджестов обновлено")
+                return {
+                    "status": "success",  # ДОБАВЛЯЕМ ЯВНЫЙ СТАТУС УСПЕХА
+                    "updated_digests": updated_digests,
+                    "updated_count": updated_count
+                }
+            else:
+                # Если ничего не обновили - это тоже может быть нормально
+                logger.info("Обновление дайджестов завершено: нет дайджестов для обновления")
+                return {
+                    "status": "success",  # УСПЕХ, даже если нечего было обновлять
+                    "updated_digests": [],
+                    "updated_count": 0
+                }
+                
         except Exception as e:
             logger.error(f"Ошибка при обновлении дайджеста: {str(e)}")
             return {"status": "error", "error": str(e)}
