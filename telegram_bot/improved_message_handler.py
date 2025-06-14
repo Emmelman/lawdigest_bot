@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import ContextTypes
+from llm.gemma_model import GemmaLLM # Used for LLM
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +19,13 @@ async def improved_message_handler(update: Update, context: ContextTypes.DEFAULT
         db_manager: Менеджер базы данных
         llm_model: Модель для генерации ответов
     """
-    user_message = update.message.text
+    # Retrieve db_manager and llm_model from bot_data if not passed directly
+    if not db_manager:
+        db_manager = context.bot_data.get("db_manager")
+    if not llm_model:
+        llm_model = context.bot_data.get("llm_model")
+    
+    user_message = update.message.text # Original position. No change needed.
     user_id = update.effective_user.id
     
     logger.info(f"Получено сообщение от пользователя {user_id}: {user_message[:50]}...")
@@ -49,15 +56,15 @@ async def improved_message_handler(update: Update, context: ContextTypes.DEFAULT
         await update.message.chat.send_action(action="typing")
         
         # Получаем контекст для ответа - последний доступный дайджест
-        logger.info("Поиск дайджеста для контекста...")
+        logger.info(f"Поиск дайджеста для контекста для пользователя {user_id}...")
         brief_digest = db_manager.get_latest_digest_with_sections(digest_type="brief")
         detailed_digest = db_manager.get_latest_digest_with_sections(digest_type="detailed")
         
-        # Используем подробный дайджест для контекста, если он есть, иначе краткий
+        # Предпочитаем подробный дайджест, если есть
         digest = detailed_digest or brief_digest
         
         if digest:
-            logger.info(f"Найден дайджест ID={digest['id']} от {digest['date'].strftime('%Y-%m-%d')} для контекста")
+            logger.info(f"Найден дайджест ID={digest['id']} от {digest['date'].strftime('%Y-%m-%d')} ({digest['digest_type']}) для контекста")
         else:
             logger.warning("Дайджест не найден. Используем контекст по умолчанию.")
             # Отправляем информацию пользователю

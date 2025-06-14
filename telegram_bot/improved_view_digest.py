@@ -234,7 +234,7 @@ async def view_digest_section_callback(update: Update, context: ContextTypes.DEF
             )
         else:
             # Если только одна часть, отправляем ее без пагинации
-            digest_type = "краткий" if digest["digest_type"] == "brief" else "подробный"
+            digest_type = "краткий" if digest["digest_type"] == "brief" else "подробный" # Re-evaluate type for clarity
             date_str = digest["date"].strftime("%d.%m.%Y")
             
             header = f"📊 {digest_type.capitalize()} дайджест за {date_str}\n"

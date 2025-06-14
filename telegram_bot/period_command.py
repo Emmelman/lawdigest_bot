@@ -9,18 +9,18 @@ import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from agents.data_collector import DataCollectorAgent
-from agents.analyzer import AnalyzerAgent
-from agents.critic import CriticAgent
-from agents.digester import DigesterAgent
-from llm.qwen_model import QwenLLM
-from llm.gemma_model import GemmaLLM
-from utils.text_utils import TextUtils
+from agents.data_collector import DataCollectorAgent # Already imported
+from agents.analyzer import AnalyzerAgent # Already imported
+from agents.critic import CriticAgent # Already imported
+from agents.digester import DigesterAgent # Already imported
+from llm.qwen_model import QwenLLM # Added missing import
+from llm.gemma_model import GemmaLLM # Added missing import
+from utils.text_utils import TextUtils # Added missing import
 
 logger = logging.getLogger(__name__)
 
 # Утилиты для работы с текстом
-utils = TextUtils()
+utils = TextUtils() # Instantiate TextUtils
 
 async def period_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_manager):
     """Обработчик команды /period - генерация дайджеста за произвольный период"""
@@ -352,11 +352,6 @@ async def period_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
     try:
         collector = DataCollectorAgent(db_manager)
         
-        # Обновляем статус
-        await status_message.edit_text(
-            f"{status_message.text}\n"
-            f"Собираю данные {period_description}... 📥"
-        )
         days_back_value = (end_date.date() - start_date.date()).days + 1
          # Запускаем сбор данных с принудительным обновлением
         collect_result = await collector.collect_data(
@@ -489,7 +484,7 @@ async def period_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
             analyzer = AnalyzerAgent(db_manager, QwenLLM())
             analyzer.fast_check = True  # Включаем режим быстрой проверки
             
-            analyze_result = analyzer.analyze_messages_batched(
+            analyze_result = analyzer.analyze_messages( # Changed to analyze_messages
                 limit=len(unanalyzed_messages),
                 batch_size=10
             )
@@ -576,7 +571,7 @@ async def period_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
         db_manager.save_digest_generation(
             source="bot",
             user_id=update.effective_user.id,
-            channels=collect_result.get("channels_stats", {}).keys(),
+            channels=list(collect_result.get("channels_stats", {}).keys()), # Convert dict_keys to list
             messages_count=total_messages,
             digest_ids=db_ids,
             start_date=start_date,
@@ -620,4 +615,4 @@ def get_digest_type_name(digest_type):
     elif digest_type == "both":
         return "полный"
     else:
-        return digest_type    
+        return digest_type

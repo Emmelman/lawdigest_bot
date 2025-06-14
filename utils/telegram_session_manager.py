@@ -18,6 +18,7 @@ class TelegramSessionManager:
     _instance = None
     _client = None
     _lock = asyncio.Lock()
+    _active_clients = [] # To keep track of all clients handed out
     _active_operations = 0
     _last_operation_time = 0
     
@@ -74,6 +75,7 @@ class TelegramSessionManager:
                 # Явно указываем использование сохранённой авторизации
                 await client.start()
                 logger.info("Подключен клиент Telegram (сессия сохранена)")
+                self._active_clients.append(client) # Track the active client
                 return client
             except Exception as e:
                 logger.error(f"Ошибка при создании клиента Telegram: {str(e)}")
@@ -90,7 +92,9 @@ class TelegramSessionManager:
         async with self._lock:
             if client:
                 try:
-                    await client.disconnect()
+                    if client in self._active_clients:
+                        self._active_clients.remove(client) # Remove from tracking list
+                    await client.disconnect() # Disconnect the specific client
                     # Удаляем файл сессии после использования
                     session_file = f"{client.session.filename}.session"
                     if os.path.exists(session_file):
@@ -103,3 +107,19 @@ class TelegramSessionManager:
                 finally:
                     self._active_operations -= 1
                     logger.debug(f"Клиент Telegram освобожден (активно: {self._active_operations})")
+
+    async def close_all_clients(self):
+        """
+        Закрывает все активные клиенты Telegram, которые были получены через этот менеджер.
+        """
+        async with self._lock:
+            logger.info(f"Закрытие всех {len(self._active_clients)} активных клиентов Telegram...")
+            clients_to_close = list(self._active_clients) # Create a copy to iterate
+            self._active_clients.clear() # Clear the list before closing
+            
+            for client in clients_to_close:
+                try:
+                    await client.disconnect()
+                except Exception as e:
+                    logger.warning(f"Ошибка при закрытии клиента {client.session.filename}: {str(e)}")
+            logger.info("Все активные клиенты Telegram закрыты.")
