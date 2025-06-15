@@ -770,22 +770,87 @@ class DigesterAgent:
             for i, msg in enumerate(msgs[:3]):
                 logger.info(f"  Сообщение {i} для '{category}': тип={type(msg)}, имеет атрибут 'text'={hasattr(msg, 'text')}")
 
+        # ========== СТРАТЕГИЧЕСКОЕ ПЛАНИРОВАНИЕ (НОВОЕ) ==========
+        brief_strategy = None
+        detailed_strategy = None
+        
+        if digest_type in ["brief", "both"]:
+            try:
+                brief_strategy = self._plan_digest_strategy(
+                    messages_by_category, "brief", end_date, days_back, focus_category
+                )
+                logger.info("🎯 Стратегия для краткого дайджеста создана")
+            except Exception as e:
+                logger.warning(f"Ошибка планирования стратегии краткого дайджеста: {e}")
+                brief_strategy = None
+        
+        if digest_type in ["detailed", "both"]:
+            try:
+                detailed_strategy = self._plan_digest_strategy(
+                    messages_by_category, "detailed", end_date, days_back, focus_category
+                )
+                logger.info("🎯 Стратегия для подробного дайджеста создана")
+            except Exception as e:
+                logger.warning(f"Ошибка планирования стратегии подробного дайджеста: {e}")
+                detailed_strategy = None
+        # ========== КОНЕЦ СТРАТЕГИЧЕСКОГО ПЛАНИРОВАНИЯ ==========
+
+        if brief_strategy or detailed_strategy:
+            logger.info("🎯 Дайджест создается с использованием стратегического планирования")
+            if brief_strategy:
+                logger.info("   📋 Краткий: контентная стратегия применена")
+            if detailed_strategy:
+                logger.info("   📖 Подробный: стратегическое планирование активно")
+
         # Формируем секции дайджеста в зависимости от типа
         brief_sections = {}
         detailed_sections = {}
         
+        # Применяем стратегический порядок категорий если доступен
+        categories_to_process_brief = [category for category in CATEGORIES if category in messages_by_category]
+        if "другое" in messages_by_category:
+            categories_to_process_brief.append("другое")
+
+        if digest_type == "brief" and brief_strategy and brief_strategy.get("category_order"):
+            strategic_order = brief_strategy["category_order"]
+            # Перестраиваем порядок согласно стратегии
+            ordered_categories = []
+            for cat in strategic_order:
+                if cat in categories_to_process_brief:
+                    ordered_categories.append(cat)
+            # Добавляем категории, не вошедшие в стратегический порядок
+            for cat in categories_to_process_brief:
+                if cat not in ordered_categories:
+                    ordered_categories.append(cat)
+            categories_to_process_brief = ordered_categories
+            logger.info(f"📊 Используется стратегический порядок категорий для краткого дайджеста: {' → '.join(categories_to_process_brief)}")
+        
+        categories_to_process_detailed = [category for category in CATEGORIES if category in messages_by_category]
+        if "другое" in messages_by_category:
+            categories_to_process_detailed.append("другое")
+
+        elif digest_type == "detailed" and detailed_strategy and detailed_strategy.get("category_order"):
+            strategic_order = detailed_strategy["category_order"]
+            ordered_categories = []
+            for cat in strategic_order:
+                if cat in categories_to_process_detailed:
+                    ordered_categories.append(cat)
+            for cat in categories_to_process_detailed:
+                if cat not in ordered_categories:
+                    ordered_categories.append(cat)
+            categories_to_process_detailed = ordered_categories
+            logger.info(f"📊 Используется стратегический порядок категорий для подробного дайджеста: {' → '.join(categories_to_process_detailed)}")
+
         if digest_type in ["brief", "both"]:
             # Параллельная обработка категорий для краткого дайджеста
-            categories_to_process = [cat for cat in messages_by_category.keys()]
             brief_sections = self._process_categories_parallel(
-                categories_to_process, messages_by_category, "brief"
+                categories_to_process_brief, messages_by_category, "brief"
             )
         
         if digest_type in ["detailed", "both"]:
             # Параллельная обработка категорий для подробного дайджеста
-            categories_to_process = [cat for cat in messages_by_category.keys()]
             detailed_sections = self._process_categories_parallel(
-                categories_to_process, messages_by_category, "detailed"
+                categories_to_process_detailed, messages_by_category, "detailed"
             )
 
         results = {
@@ -1124,3 +1189,504 @@ class DigesterAgent:
         
         logger.info(f"Сохранен дайджест типа '{digest_type}' за {date.strftime('%Y-%m-%d')}, ID: {result['id']}")
         return result
+    # В agents/digester.py - добавить эти методы для стратегического планирования
+
+    def _plan_digest_strategy(self, messages_by_category, digest_type, date, days_back=1, 
+                            focus_category=None, target_audience="general"):
+        """
+        Стратегическое планирование контента дайджеста
+        
+        Args:
+            messages_by_category (dict): Сообщения по категориям
+            digest_type (str): Тип дайджеста (brief/detailed)
+            date (datetime): Дата дайджеста
+            days_back (int): Количество дней
+            focus_category (str): Фокусная категория
+            target_audience (str): Целевая аудитория
+            
+        Returns:
+            dict: Стратегия создания дайджеста
+        """
+        logger.info(f"🎯 ПЛАНИРОВАНИЕ СТРАТЕГИИ ДАЙДЖЕСТА:")
+        logger.info(f"   📅 Дата: {date.strftime('%Y-%m-%d')}")
+        logger.info(f"   📋 Тип: {digest_type}")
+        logger.info(f"   🎪 Категорий: {len(messages_by_category)}")
+        logger.info(f"   📊 Всего сообщений: {sum(len(msgs) for msgs in messages_by_category.values())}")
+        
+        # Анализируем состав сообщений
+        category_analysis = {}
+        total_messages = 0
+        
+        for category, messages in messages_by_category.items():
+            count = len(messages)
+            total_messages += count
+            
+            # Анализируем важность категории
+            importance_score = self._calculate_category_importance(category, messages, focus_category)
+            
+            category_analysis[category] = {
+                "count": count,
+                "importance": importance_score,
+                "percentage": 0,  # Будет рассчитано ниже
+                "recommended_length": "short"  # Будет определено ниже
+            }
+        
+        # Рассчитываем процентное соотношение
+        for category in category_analysis:
+            if total_messages > 0:
+                category_analysis[category]["percentage"] = (
+                    category_analysis[category]["count"] / total_messages * 100
+                )
+        
+        # Создаем стратегический план
+        strategy_prompt = f"""
+        ПЛАНИРОВАНИЕ КОНТЕНТНОЙ СТРАТЕГИИ ДАЙДЖЕСТА:
+        
+        Ты - стратег контент-планирования для правового дайджеста.
+        
+        ИСХОДНЫЕ ДАННЫЕ:
+        - Дата: {date.strftime('%d.%m.%Y')}
+        - Период: {days_back} {'день' if days_back == 1 else 'дней'}
+        - Тип дайджеста: {'краткий' if digest_type == 'brief' else 'подробный'}
+        - Целевая аудитория: {target_audience}
+        - Фокус на категории: {focus_category or 'нет'}
+        - Всего сообщений: {total_messages}
+        
+        РАСПРЕДЕЛЕНИЕ ПО КАТЕГОРИЯМ:
+        {self._format_category_stats(category_analysis)}
+        
+        ЗАДАЧА: Создать стратегию для оптимального дайджеста
+        
+        УЧИТЫВАЙ:
+        1. ПРИОРИТИЗАЦИЯ КОНТЕНТА:
+        - Какие категории наиболее важны для читателей?
+        - Что должно быть в начале дайджеста?
+        - Как сбалансировать объем разных категорий?
+        
+        2. СТИЛЬ И ПОДАЧА:
+        {"- Краткий формат: основные факты, минимум деталей" if digest_type == "brief" else "- Подробный формат: анализ, контекст, последствия"}
+        - Юридическая точность + доступность
+        - Структурированная подача
+        
+        3. ЧИТАТЕЛЬСКАЯ ЦЕННОСТЬ:
+        - Что практически важно для аудитории?
+        - Какие выводы и связи стоит подчеркнуть?
+        - Как сделать информацию действенной?
+        
+        ДАЙ РЕКОМЕНДАЦИИ в формате:
+        Структура: [порядок категорий по важности]
+        Акценты: [на чем сделать упор в каждой категории]
+        Стиль: [тон и подход к изложению]
+        Приоритеты: [что выделить особо]
+        """
+        
+        try:
+            strategy_response = self.llm_model.generate(
+                strategy_prompt, 
+                max_tokens=600, 
+                temperature=0.3
+            )
+            
+            # Парсим стратегию
+            strategy = self._parse_strategy_response(
+                strategy_response, category_analysis, digest_type
+            )
+            
+            # Логируем стратегию
+            self._log_content_strategy(strategy, category_analysis)
+            
+            return strategy
+            
+        except Exception as e:
+            logger.error(f"Ошибка при планировании стратегии: {str(e)}")
+            # Fallback стратегия
+            return self._create_fallback_strategy(category_analysis, digest_type)
+
+    def _calculate_category_importance(self, category, messages, focus_category=None):
+        """Рассчитывает важность категории для дайджеста"""
+        
+        # Базовые веса важности категорий
+        base_weights = {
+            'новые законы': 5,  # Самое важное - новые законы
+            'поправки к законам': 4,  # Изменения в существующих законах
+            'законодательные инициативы': 3,  # Будущие изменения
+            'новая судебная практика': 4,  # Важные разъяснения
+            'другое': 1  # Наименее важное
+        }
+        
+        base_score = base_weights.get(category, 2)
+        
+        # Бонус за фокусную категорию
+        if focus_category and category == focus_category:
+            base_score += 2
+        
+        # Бонус за количество сообщений (популярность темы)
+        message_count = len(messages)
+        if message_count > 3:
+            base_score += 1
+        elif message_count > 1:
+            base_score += 0.5
+        
+        # Анализируем ключевые слова для определения важности
+        important_keywords = [
+            'президент', 'подписал', 'вступает в силу', 'федеральный закон',
+            'конституционный суд', 'верховный суд', 'пленум',
+            'государственная дума', 'совет федерации'
+        ]
+        
+        keyword_bonus = 0
+        for message in messages:
+            text_lower = message.text.lower()
+            for keyword in important_keywords:
+                if keyword in text_lower:
+                    keyword_bonus += 0.2
+                    break  # Один бонус на сообщение
+        
+        final_score = min(5, base_score + keyword_bonus)  # Максимум 5
+        
+        return round(final_score, 1)
+
+    def _format_category_stats(self, category_analysis):
+        """Форматирует статистику категорий для промпта"""
+        
+        stats_text = ""
+        sorted_categories = sorted(
+            category_analysis.items(), 
+            key=lambda x: x[1]['importance'], 
+            reverse=True
+        )
+        
+        for category, stats in sorted_categories:
+            stats_text += f"- {category}: {stats['count']} сообщений "
+            stats_text += f"({stats['percentage']:.1f}%), важность: {stats['importance']}/5\n"
+        
+        return stats_text
+
+    def _parse_strategy_response(self, response, category_analysis, digest_type):
+        """Парсит ответ LLM и создает структурированную стратегию"""
+        
+        strategy = {
+            "content_priorities": [],
+            "category_order": [],
+            "style_guidelines": [],
+            "emphasis_points": [],
+            "tone": "professional",
+            "approach": digest_type,
+            "raw_response": response
+        }
+        
+        # Улучшенный парсинг с множественными паттернами
+        lines = response.strip().split('\n')
+        current_section = None
+        
+        # Логируем сырой ответ для отладки
+        logger.debug(f"Парсинг ответа LLM: {response[:200]}...")
+        
+        for line in lines:
+            line_clean = line.strip()
+            if not line_clean:
+                continue
+            
+            line_lower = line_clean.lower()
+            
+            # Улучшенное определение секций с множественными паттернами
+            if any(word in line_lower for word in ['структура:', 'порядок:', 'последовательность:']):
+                current_section = 'structure'
+                content = self._extract_content_after_colon(line_clean)
+                if content:
+                    strategy["category_order"] = self._extract_categories_from_text(content, category_analysis)
+                    logger.debug(f"Найдена структура: {content}")
+            
+            elif any(word in line_lower for word in ['акценты:', 'акцент:', 'выделить:', 'подчеркнуть:']):
+                current_section = 'emphasis'
+                content = self._extract_content_after_colon(line_clean)
+                if content:
+                    strategy["emphasis_points"].append(content)
+                    logger.debug(f"Найдены акценты: {content}")
+            
+            elif any(word in line_lower for word in ['стиль:', 'тон:', 'подача:', 'изложение:']):
+                current_section = 'style'
+                content = self._extract_content_after_colon(line_clean)
+                if content:
+                    strategy["style_guidelines"].append(content)
+                    logger.debug(f"Найден стиль: {content}")
+            
+            elif any(word in line_lower for word in ['приоритеты:', 'приоритет:', 'важно:', 'главное:']):
+                current_section = 'priorities'
+                content = self._extract_content_after_colon(line_clean)
+                if content:
+                    strategy["content_priorities"].append(content)
+                    logger.debug(f"Найдены приоритеты: {content}")
+            
+            elif current_section and line_clean and not line_clean.startswith('-'):
+                # Продолжение предыдущей секции (если не начинается с -)
+                if current_section == 'emphasis':
+                    strategy["emphasis_points"].append(line_clean)
+                elif current_section == 'style':
+                    strategy["style_guidelines"].append(line_clean)
+                elif current_section == 'priorities':
+                    strategy["content_priorities"].append(line_clean)
+                elif current_section == 'structure':
+                    additional_cats = self._extract_categories_from_text(line_clean, category_analysis)
+                    for cat in additional_cats:
+                        if cat not in strategy["category_order"]:
+                            strategy["category_order"].append(cat)
+            
+            # Альтернативный способ - поиск маркированных списков
+            elif line_clean.startswith('-') or line_clean.startswith('•'):
+                bullet_content = line_clean[1:].strip()
+                if bullet_content:
+                    # Добавляем в текущую секцию или в общие приоритеты
+                    if current_section == 'emphasis':
+                        strategy["emphasis_points"].append(bullet_content)
+                    elif current_section == 'style':
+                        strategy["style_guidelines"].append(bullet_content)
+                    elif current_section == 'priorities':
+                        strategy["content_priorities"].append(bullet_content)
+                    else:
+                        # Если секция не определена, добавляем как приоритет
+                        strategy["content_priorities"].append(bullet_content)
+        
+        # Fallback: извлекаем ключевые слова из всего текста
+        if not strategy["content_priorities"]:
+            strategy["content_priorities"] = self._extract_fallback_priorities(response)
+            logger.debug("Используются fallback приоритеты")
+        
+        if not strategy["style_guidelines"]:
+            strategy["style_guidelines"] = self._extract_fallback_style(response)
+            logger.debug("Используются fallback стилистические рекомендации")
+        
+        if not strategy["emphasis_points"]:
+            strategy["emphasis_points"] = self._extract_fallback_emphasis(response)
+            logger.debug("Используются fallback акценты")
+        
+        # Если порядок категорий не определен, используем порядок по важности
+        if not strategy["category_order"]:
+            strategy["category_order"] = sorted(
+                category_analysis.keys(),
+                key=lambda cat: category_analysis[cat]['importance'],
+                reverse=True
+            )
+            logger.debug("Используется порядок по важности")
+        
+        # Логируем финальную стратегию
+        logger.debug(f"Финальная стратегия: приоритеты={len(strategy['content_priorities'])}, "
+                    f"стиль={len(strategy['style_guidelines'])}, "
+                    f"акценты={len(strategy['emphasis_points'])}")
+        
+        return strategy
+
+    def _extract_categories_from_text(self, text, category_analysis):
+        """Извлекает упорядоченный список категорий из текста"""
+        
+        categories_found = []
+        text_lower = text.lower()
+        
+        for category in category_analysis.keys():
+            if category.lower() in text_lower:
+                categories_found.append(category)
+        
+        # Добавляем категории, которые не были упомянуты
+        all_categories = list(category_analysis.keys())
+        for category in all_categories:
+            if category not in categories_found:
+                categories_found.append(category)
+        
+        return categories_found
+
+    def _create_fallback_strategy(self, category_analysis, digest_type):
+        """Создает базовую стратегию в случае ошибки"""
+        
+        # Сортируем категории по важности
+        ordered_categories = sorted(
+            category_analysis.keys(),
+            key=lambda cat: category_analysis[cat]['importance'],
+            reverse=True
+        )
+        
+        return {
+            "content_priorities": ["Актуальность", "Правовая значимость", "Влияние на граждан"],
+            "category_order": ordered_categories,
+            "style_guidelines": [
+                "Ясность изложения",
+                "Правовая точность", 
+                "Структурированность"
+            ],
+            "emphasis_points": ["Новые законы", "Важные изменения"],
+            "tone": "professional",
+            "approach": digest_type,
+            "raw_response": "Fallback стратегия"
+        }
+
+    def _log_content_strategy(self, strategy, category_analysis):
+        """Логирует разработанную контентную стратегию"""
+        
+        logger.info("📋 КОНТЕНТНАЯ СТРАТЕГИЯ ДАЙДЖЕСТА:")
+        logger.info("   " + "=" * 50)
+        
+        # Порядок категорий
+        logger.info("   📊 ПОРЯДОК КАТЕГОРИЙ:")
+        for i, category in enumerate(strategy["category_order"], 1):
+            importance = category_analysis.get(category, {}).get('importance', 0)
+            count = category_analysis.get(category, {}).get('count', 0)
+            logger.info(f"     {i}. {category} (важность: {importance}, сообщений: {count})")
+        
+        # Приоритеты контента
+        if strategy["content_priorities"]:
+            logger.info("   🎯 ПРИОРИТЕТЫ КОНТЕНТА:")
+            for priority in strategy["content_priorities"]:
+                logger.info(f"     • {priority}")
+        
+        # Стилистические рекомендации
+        if strategy["style_guidelines"]:
+            logger.info("   ✍️ СТИЛЬ И ПОДАЧА:")
+            for guideline in strategy["style_guidelines"]:
+                logger.info(f"     • {guideline}")
+        
+        # Акценты
+        if strategy["emphasis_points"]:
+            logger.info("   ⭐ АКЦЕНТЫ:")
+            for emphasis in strategy["emphasis_points"]:
+                logger.info(f"     • {emphasis}")
+        
+        logger.info("   " + "=" * 50)
+
+    
+
+    def _generate_category_overview_with_strategy(self, category, messages, digest_type, strategy=None):
+        """Генерация обзора категории с учетом стратегии"""
+        
+        if not strategy:
+            # Fallback на существующий метод
+            return self._generate_category_overview(category, messages, digest_type)
+        
+        # Определяем приоритет категории в стратегии
+        category_priority = 1
+        if category in strategy["category_order"]:
+            category_priority = strategy["category_order"].index(category) + 1
+        
+        # Определяем акценты для категории
+        relevant_emphasis = [emp for emp in strategy["emphasis_points"] 
+                            if category.lower() in emp.lower()]
+        
+        # Адаптивный промпт с учетом стратегии
+        strategic_prompt = f"""
+        СОЗДАНИЕ {'КРАТКОГО' if digest_type == 'brief' else 'ПОДРОБНОГО'} ОБЗОРА КАТЕГОРИИ С УЧЕТОМ СТРАТЕГИИ:
+        
+        СТРАТЕГИЧЕСКИЕ УКАЗАНИЯ:
+        - Приоритет категории: {category_priority} из {len(strategy['category_order'])}
+        - Стиль: {', '.join(strategy['style_guidelines'][:3])}
+        - Акценты: {', '.join(relevant_emphasis) if relevant_emphasis else 'стандартная подача'}
+        - Подход: {strategy['approach']}
+        
+        КАТЕГОРИЯ: {category}
+        КОЛИЧЕСТВО СООБЩЕНИЙ: {len(messages)}
+        
+        СООБЩЕНИЯ ДЛЯ АНАЛИЗА:
+        {self._format_messages_for_llm(messages, max_messages=10 if digest_type == 'detailed' else 5)}
+        
+        ЗАДАЧА: Создай {digest_type} обзор категории с учетом стратегических указаний
+        
+        ТРЕБОВАНИЯ:
+        {"- Краткость: 1-2 предложения на новость" if digest_type == "brief" else "- Подробность: анализ, контекст, последствия"}
+        - Следуй стратегическим акцентам
+        - Используй рекомендованный стиль
+        - Учитывай приоритет категории
+        
+        РЕЗУЛЬТАТ: профессиональный текст обзора категории
+        """
+        
+        try:
+            max_tokens = 300 if digest_type == "brief" else 600
+            response = self.llm_model.generate(strategic_prompt, max_tokens=max_tokens, temperature=0.4)
+            
+            logger.debug(f"Стратегический обзор категории '{category}' создан (приоритет: {category_priority})")
+            return response
+            
+        except Exception as e:
+            logger.error(f"Ошибка при создании стратегического обзора: {str(e)}")
+            # Fallback на обычный метод
+            return self._generate_category_overview(category, messages, digest_type)
+    
+    def _extract_content_after_colon(self, line):
+        """Извлекает содержимое после двоеточия"""
+        if ':' in line:
+            return line.split(':', 1)[1].strip()
+        return ""
+
+    def _extract_fallback_priorities(self, response):
+        """Извлекает приоритеты через поиск ключевых слов"""
+        priorities = []
+        response_lower = response.lower()
+        
+        # Ключевые слова для приоритетов
+        priority_keywords = {
+            'актуальность': 'Актуальность правовых изменений',
+            'важность': 'Правовая важность',
+            'граждан': 'Влияние на граждан',
+            'бизнес': 'Влияние на бизнес',
+            'практическ': 'Практическая значимость',
+            'срочн': 'Срочность изменений'
+        }
+        
+        for keyword, priority in priority_keywords.items():
+            if keyword in response_lower:
+                priorities.append(priority)
+                if len(priorities) >= 3:  # Максимум 3 приоритета
+                    break
+        
+        # Если ничего не найдено, используем базовые
+        if not priorities:
+            priorities = ["Правовая значимость", "Актуальность", "Влияние на практику"]
+        
+        return priorities
+
+    def _extract_fallback_style(self, response):
+        """Извлекает стилистические рекомендации через поиск ключевых слов"""
+        styles = []
+        response_lower = response.lower()
+        
+        style_keywords = {
+            'ясн': 'Ясность изложения',
+            'точн': 'Правовая точность',
+            'структур': 'Структурированность',
+            'доступн': 'Доступность понимания',
+            'кратк': 'Краткость формулировок',
+            'профессионал': 'Профессиональный тон'
+        }
+        
+        for keyword, style in style_keywords.items():
+            if keyword in response_lower:
+                styles.append(style)
+                if len(styles) >= 3:
+                    break
+        
+        if not styles:
+            styles = ["Правовая точность", "Ясность изложения", "Структурированность"]
+        
+        return styles
+
+    def _extract_fallback_emphasis(self, response):
+        """Извлекает акценты через поиск ключевых слов"""
+        emphasis = []
+        response_lower = response.lower()
+        
+        emphasis_keywords = {
+            'новые законы': 'Новые федеральные законы',
+            'поправки': 'Изменения в законодательстве',
+            'суд': 'Судебная практика',
+            'президент': 'Решения на высшем уровне',
+            'госдума': 'Законодательные инициативы',
+            'важн': 'Наиболее важные изменения'
+        }
+        
+        for keyword, emph in emphasis_keywords.items():
+            if keyword in response_lower:
+                emphasis.append(emph)
+                if len(emphasis) >= 3:
+                    break
+        
+        if not emphasis:
+            emphasis = ["Ключевые правовые изменения", "Влияние на практику"]
+        
+        return emphasis
