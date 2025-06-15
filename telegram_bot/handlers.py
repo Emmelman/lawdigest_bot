@@ -76,12 +76,25 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db_ma
 async def list_digests_command(message_object: telegram.Message, context: ContextTypes.DEFAULT_TYPE, db_manager):
     """Обработчик команды /list - интерактивный список доступных дайджестов"""
     # Получаем последние дайджесты (увеличиваем лимит до 15)
-    digests = db_manager.find_digests_by_parameters(limit=15)
+    digests = db_manager.find_digests_by_parameters(limit=30)
     logger.info(f"Найдено {len(digests)} дайджестов: {[d['id'] for d in digests]}")
+    
+     # ДИАГНОСТИКА: Проверяем ВСЕ дайджесты
+    #logger.info("=== ДИАГНОСТИКА ДАЙДЖЕСТОВ ===")
+    #for digest in digests:
+     #   logger.info(f"ID: {digest['id']}, Тип: {digest['digest_type']}, Дата: {digest['date']}, is_today: {digest.get('is_today', 'N/A')}")
+    
+    # ДИАГНОСТИКА: Проверяем дайджесты за сегодня отдельно
+    #today = datetime.now().date()
+    #today_digests = [d for d in digests if d['date'].date() == today]
+    #logger.info(f"Дайджестов за сегодня ({today}): {len(today_digests)}")
+    #for td in today_digests:
+     #   logger.info(f"  - ID: {td['id']}, Тип: {td['digest_type']}")
+
     if not digests:
         await message_object.reply_text("На данный момент нет доступных дайджестов.")
         return
-    
+       
     # Группируем дайджесты по дате для более компактного отображения
     digests_by_date = {}
     for digest in digests:
@@ -98,6 +111,13 @@ async def list_digests_command(message_object: telegram.Message, context: Contex
         
         digests_by_date[date_str].append(digest)
     
+    # ДИАГНОСТИКА: Проверяем группировку по датам
+    #logger.info("=== ГРУППИРОВКА ПО ДАТАМ ===")
+    #for date_str, date_digests in digests_by_date.items():
+     #   logger.info(f"Дата: {date_str}")
+      #  for dd in date_digests:
+       #     logger.info(f"  - ID: {dd['id']}, Тип: {dd['digest_type']}")
+
     # Создаем клавиатуру с кнопками для каждой даты
     keyboard = []
     
@@ -111,6 +131,9 @@ async def list_digests_command(message_object: telegram.Message, context: Contex
         has_brief = any(d["digest_type"] == "brief" for d in date_digests)
         has_detailed = any(d["digest_type"] == "detailed" for d in date_digests)
         
+        # ДИАГНОСТИКА: Проверяем логику определения типов
+        logger.info(f"Дата {date_str}: has_brief={has_brief}, has_detailed={has_detailed}")
+
         # Если есть оба типа, создаем отдельные кнопки
         if has_brief and has_detailed:
             brief_digest = next((d for d in date_digests if d["digest_type"] == "brief"), None)
@@ -123,14 +146,19 @@ async def list_digests_command(message_object: telegram.Message, context: Contex
             # Если дайджест за сегодня, добавляем метку
             today = datetime.now().date()
             if brief_digest and brief_digest.get("date").date() == today:
-                brief_label = f"📌 {brief_label}"
+                brief_label = f"🔥 {brief_label}"
             if detailed_digest and detailed_digest.get("date").date() == today:
-                detailed_label = f"📌 {detailed_label}"
+                detailed_label = f"🔥 {detailed_label}"
             
-            keyboard.append([
-                InlineKeyboardButton(brief_label, callback_data=f"view_digest_{brief_digest['id']}") if brief_digest else None,
-                InlineKeyboardButton(detailed_label, callback_data=f"view_digest_{detailed_digest['id']}") if detailed_digest else None
-            ])
+            row = []
+            if brief_digest:
+                row.append(InlineKeyboardButton(brief_label, callback_data=f"view_digest_{brief_digest['id']}"))
+            if detailed_digest:
+                row.append(InlineKeyboardButton(detailed_label, callback_data=f"view_digest_{detailed_digest['id']}"))
+            
+            # Добавляем строку только если есть кнопки
+            if row:
+                keyboard.append(row)
         else:
             # Если есть только один тип, создаем одну кнопку
             for digest in date_digests:
@@ -144,7 +172,7 @@ async def list_digests_command(message_object: telegram.Message, context: Contex
                 # Если дайджест за сегодня, добавляем метку
                 today = datetime.now().date()
                 if digest.get("date").date() == today:
-                    button_label = f"📌 {button_label}"
+                    button_label = f"🔥 {button_label}"
                 
                 keyboard.append([
                     InlineKeyboardButton(button_label, callback_data=f"view_digest_{digest['id']}")
@@ -173,18 +201,20 @@ async def category_selection_command(update: Update, context: ContextTypes.DEFAU
         await update.message.reply_text("Дайджесты еще не сформированы.")
         return
     
-    # Группируем по датам и типам (краткий/подробный)
+    # ИСПРАВЛЕНО: правильная группировка по датам (как в list_digests_command)
     digests_by_date = {}
     for digest in digests:
         date_str = digest['date'].strftime('%Y-%m-%d')
-        if date_str not in digests_by_date:
-            digests_by_date[date_str] = []
         
-        # Учитываем диапазон дат
+        # Учитываем диапазон дат, если он указан
         if digest.get("date_range_start") and digest.get("date_range_end"):
             days_diff = (digest["date_range_end"] - digest["date_range_start"]).days
             if days_diff > 0:
                 date_str = f"{digest['date_range_start'].strftime('%Y-%m-%d')} - {digest['date_range_end'].strftime('%Y-%m-%d')}"
+        
+        # ИСПРАВЛЕНО: инициализируем список, если ключа нет
+        if date_str not in digests_by_date:
+            digests_by_date[date_str] = []
         
         digests_by_date[date_str].append(digest)
     
@@ -195,16 +225,16 @@ async def category_selection_command(update: Update, context: ContextTypes.DEFAU
         if len(date_digests) > 1:
             for digest in date_digests:
                 is_today = digest.get('is_today', False)
-                today_mark = "📌 " if is_today else ""
-                type_mark = "📝" if digest['digest_type'] == "brief" else "📚"
+                today_mark = "🔥 " if is_today else ""
+                type_mark = "📋" if digest['digest_type'] == "brief" else "📚"
                 button_text = f"{today_mark}{type_mark} {date_str} ({digest['digest_type']})"
                 keyboard.append([InlineKeyboardButton(button_text, callback_data=f"select_digest_{digest['id']}")])
         else:
             # Если только один дайджест за дату, упрощаем отображение
             digest = date_digests[0]
             is_today = digest.get('is_today', False)
-            today_mark = "📌 " if is_today else ""
-            type_mark = "📝" if digest['digest_type'] == "brief" else "📚"
+            today_mark = "🔥 " if is_today else ""
+            type_mark = "📋" if digest['digest_type'] == "brief" else "📚"
             button_text = f"{today_mark}{type_mark} {date_str}"
             keyboard.append([InlineKeyboardButton(button_text, callback_data=f"select_digest_{digest['id']}")])
     
@@ -228,7 +258,7 @@ async def handle_digest_selection(update: Update, context: ContextTypes.DEFAULT_
     
     if callback_data.startswith("select_digest_"):
         digest_id = int(callback_data.replace("select_digest_", ""))
-        await show_digest_categories(query.message, digest_id, db_manager)
+        await show_digest_categories(query.message, digest_id, db_manager, context)
     elif callback_data == "select_today_digest":
         # Найти самый свежий дайджест за сегодня
         today_digests = db_manager.find_digests_by_parameters(is_today=True, limit=5)
@@ -246,48 +276,98 @@ async def handle_digest_selection(update: Update, context: ContextTypes.DEFAULT_
             else:
                 digest_id = today_digests[0]["id"]
             
-            await show_digest_categories(query.message, digest_id, db_manager)
+            await show_digest_categories(query.message, digest_id, db_manager, context)
         else:
             await query.message.reply_text("Дайджест за сегодня не найден.")
 
 # В файле telegram_bot/handlers.py 
 
-async def show_digest_categories(message, digest_id, db_manager):
+# ВЕРСИЯ С ПОДРОБНЫМИ ЛОГАМИ для show_digest_categories
+
+async def show_digest_categories(message, digest_id, db_manager, context=None):
     """Показывает категории из выбранного дайджеста"""
+        
     digest = db_manager.get_digest_by_id_with_sections(digest_id)
-    
+   
     if not digest:
+        logger.error(f"Дайджест ID={digest_id} не найден в БД")
         await message.reply_text("Дайджест не найден.")
         return
     
+    logger.info(f"Дайджест найден: дата={digest['date']}, тип={digest['digest_type']}")
+    logger.info(f"Количество секций в дайджесте: {len(digest['sections'])}")
+   
+    # ДОБАВЛЕНО: Инициализируем кэш категорий, если его нет
+    if context:
+        if not context.user_data.get("category_mapping"):
+            context.user_data["category_mapping"] = {}
+            logger.info("Инициализирован новый category_mapping")
+        else:
+            logger.info(f"category_mapping уже существует, содержит {len(context.user_data['category_mapping'])} записей")
+    else:
+        logger.warning("Context не предоставлен! Маппинг категорий не будет сохранен")
+   
     # Получаем список категорий из дайджеста
     categories = []
     for section in digest["sections"]:
         categories.append(section["category"])
-    
+        logger.info(f"Найдена секция: {section['category']}")
+   
+    logger.info(f"Всего категорий для отображения: {len(categories)}")
+   
     # Создаем кнопки для выбора категории
     keyboard = []
-    for category in categories:
+    for i, category in enumerate(categories):
+        logger.info(f"Обрабатываем категорию {i+1}/{len(categories)}: '{category}'")
+        
         icon = get_category_icon(category)
+        logger.info(f"  Иконка для '{category}': '{icon}'")
+        
+        # ДОБАВЛЕНО: Создаем и сохраняем маппинг для коротких ID
+        short_id = get_short_category_id(category)
+        logger.info(f"  Короткий ID для '{category}': '{short_id}'")
+        
+        if context:
+            mapping_key = f"{digest_id}_{short_id}"
+            context.user_data["category_mapping"][mapping_key] = category
+            logger.info(f"  Сохранен маппинг: '{mapping_key}' -> '{category}'")
+        else:
+            logger.warning(f"  Маппинг для '{category}' НЕ сохранен (нет context)")
+        
+        callback_data = f"ds_{digest_id}_{short_id}"
+        logger.info(f"  Callback data: '{callback_data}'")
+        
         # Используем формат cat_digest_id_category для передачи ID дайджеста
-        keyboard.append([InlineKeyboardButton(f"{icon} {category}", callback_data=f"ds_{digest_id}_{get_short_category_id(category)}")])
-    
+        keyboard.append([InlineKeyboardButton(f"{icon} {category}", callback_data=callback_data)])
+   
     # Добавляем кнопку "Весь дайджест"
     keyboard.append([InlineKeyboardButton("📄 Весь дайджест", callback_data=f"df_{digest_id}")])
-    
+   
     # Добавляем кнопку "Назад к списку дайджестов"
     keyboard.append([InlineKeyboardButton("⬅️ Назад к списку", callback_data="sl")])
-    
+   
     reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    logger.info(f"Создана клавиатура с {len(keyboard)} кнопками")
+    
+    # Финальная проверка маппинга
+    if context and context.user_data.get("category_mapping"):
+        logger.info(f"Финальное состояние category_mapping:")
+        for key, value in context.user_data["category_mapping"].items():
+            logger.info(f"  '{key}' -> '{value}'")
     
     digest_date = digest['date'].strftime('%d.%m.%Y')
     digest_type = "краткий" if digest['digest_type'] == "brief" else "подробный"
-    
+   
+    logger.info(f"Отправляем сообщение пользователю: дайджест за {digest_date} ({digest_type})")
+   
     await message.reply_text(
         f"Дайджест за {digest_date} ({digest_type}).\n"
         f"Выберите категорию для просмотра:",
         reply_markup=reply_markup
     )
+    
+    logger.info("=== show_digest_categories завершена ===")
 
 # Обработчики ввода данных пользователем
 async def handle_date_range_input(update, context, db_manager, user_input):
@@ -545,9 +625,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, db
                 # Запрашиваем у пользователя период
                 await query.message.edit_text(
                     "Введите период для дайджеста в формате:\n"
-                    "1. ГГГГ-ММ-ДД (одна дата)\n"
-                    "2. ГГГГ-ММ-ДД ГГГГ-ММ-ДД (период)\n\n"
-                    "Например: 2025-04-15 или 2025-04-10 2025-04-15"
+                    "1. /period ГГГГ-ММ-ДД both - если хотите оба дайджеста, краткий(brief) и полный(detailed)\n"
+                    "2. /period ГГГГ-ММ-ДД ГГГГ-ММ-ДД\n\n"
+                    "Например: /period 2025-04-15 both"
                 )
                 
                 # Устанавливаем флаг ожидания ввода периода
@@ -570,7 +650,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, db
             try:
                 digest_id = int(query.data.replace("select_digest_", ""))
                 # Теперь вызываем show_digest_categories, которая покажет категории этого дайджеста
-                await show_digest_categories(query.message, digest_id, db_manager)
+                await show_digest_categories(query.message, digest_id, db_manager, context)
             except Exception as e:
                 logger.error(f"Ошибка при выборе дайджеста: {str(e)}")
                 await query.message.reply_text(f"Произошла ошибка при выборе дайджеста: {str(e)}")
@@ -990,7 +1070,7 @@ async def start_digest_generation(message, start_date, end_date, period_descript
         analyzer = AnalyzerAgent(db_manager, qwen_model)
         analyzer.fast_check = True
         
-        analyze_result = analyzer.analyze_messages_batched(
+        analyze_result = analyzer.analyze_messages(
             limit=max(total_messages, 50),
             batch_size=10
         )

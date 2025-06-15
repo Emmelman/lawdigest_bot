@@ -901,6 +901,9 @@ class DatabaseManager:
         try:
             query = session.query(Digest)
             
+            # ДИАГНОСТИКА: логируем параметры поиска
+            logger.info(f"find_digests_by_parameters вызван с: digest_type={digest_type}, limit={limit}, is_today={is_today}")
+        
             if digest_type:
                 query = query.filter(Digest.digest_type == digest_type)
             
@@ -968,8 +971,16 @@ class DatabaseManager:
             
             # Сортируем сначала по типу, потом по дате создания (сначала самые ранние)
             # Это поможет избежать дублей за один день
-            digests = query.order_by(Digest.digest_type, Digest.created_at).limit(limit).all()
             
+            #digests = query.order_by(Digest.digest_type, Digest.created_at).limit(limit).all()
+            digests = query.order_by(Digest.id.desc()).all()
+            
+            # ДИАГНОСТИКА: логируем найденные дайджесты
+            #logger.info(f"Найдено дайджестов в БД: {len(digests)}")
+            #for digest in digests:
+             #   logger.info(f"  БД: ID={digest.id}, тип={digest.digest_type}, дата={digest.date}, is_today={digest.is_today}")
+            
+
             results = []
             for digest in digests:
                 # Преобразуем в dict с нужными полями
@@ -989,6 +1000,12 @@ class DatabaseManager:
                     digest_data["is_today"] = digest.is_today
                 
                 results.append(digest_data)
+                
+                # ДИАГНОСТИКА: логируем результат (ИСПРАВЛЕНО)
+                #logger.info(f"Возвращаем дайджестов: {len(results)}")
+                #for r in results:
+                 #   logger.info(f"  Результат: ID={r['id']}, тип={r['digest_type']}, дата={r['date']}")
+                                
             
             return results
         except Exception as e:
@@ -1240,70 +1257,72 @@ class DatabaseManager:
     # В начале файла database/db_manager.py добавьте импорт:
 
 
-    @with_retry(max_attempts=5, delay=1.0)
     def update_today_flags(self):
         """Обновляет флаги is_today в соответствии с текущей датой"""
-        session = self.Session()
-        try:
-            today = datetime.now().date()
-            
-            # Находим все дайджесты с is_today=True
-            outdated_digests = session.query(Digest).filter(
-                Digest.is_today == True
-            ).all()
-            
-            updated_count = 0
-            wrong_flags_count = 0
-            
-            for digest in outdated_digests:
-                digest_date = digest.date.date()
-                should_be_today = (digest_date == today)
+        max_attempts = 5
+        delay = 1.0
+        
+        for attempt in range(max_attempts):
+            session = self.Session()
+            try:
+                today = datetime.now().date()
                 
-                if digest.is_today != should_be_today:
-                    digest.is_today = should_be_today
-                    wrong_flags_count += 1
+                # Находим все дайджесты с is_today=True
+                outdated_digests = session.query(Digest).filter(
+                    Digest.is_today == True
+                ).all()
+                
+                updated_count = 0
+                wrong_flags_count = 0
+                
+                for digest in outdated_digests:
+                    digest_date = digest.date.date()
+                    should_be_today = (digest_date == today)
                     
-                    # Логируем изменения
-                    action = "установлен" if should_be_today else "снят"
-                    logger.info(f"Для дайджеста ID={digest.id} ({digest_date}) {action} флаг is_today")
+                    if digest.is_today != should_be_today:
+                        digest.is_today = should_be_today
+                        wrong_flags_count += 1
+                        
+                        # Логируем изменения
+                        action = "установлен" if should_be_today else "снят"
+                        logger.info(f"Для дайджеста ID={digest.id} ({digest_date}) {action} флаг is_today")
+                        updated_count += 1
+                
+                # Также проверяем дайджесты за сегодня, у которых флаг может быть не установлен
+                todays_digests = []
+                all_digests = session.query(Digest).filter(Digest.is_today == False).all()
+                
+                for digest in all_digests:
+                    digest_date = digest.date.date()
+                    if digest_date == today:
+                        todays_digests.append(digest)
+                
+                for digest in todays_digests:
+                    digest.is_today = True
+                    logger.info(f"Для дайджеста ID={digest.id} ({digest.date.date()}) установлен флаг is_today")
                     updated_count += 1
-            
-            # Также проверяем дайджесты за сегодня, у которых флаг может быть не установлен
-            # Найдем все дайджесты и вручную проверим их дату вместо использования extract
-            todays_digests = []
-            all_digests = session.query(Digest).filter(Digest.is_today == False).all()
-            
-            for digest in all_digests:
-                digest_date = digest.date.date()
-                if digest_date == today:
-                    todays_digests.append(digest)
-            
-            for digest in todays_digests:
-                digest.is_today = True
-                logger.info(f"Для дайджеста ID={digest.id} ({digest.date.date()}) установлен флаг is_today")
-                updated_count += 1
-            
-            # Фиксируем изменения с повторными попытками при ошибках
-            retry_commit = 0
-            while retry_commit < 3:
-                try:
-                    session.commit()
-                    break
-                except Exception as e:
-                    retry_commit += 1
-                    if retry_commit >= 3:
-                        raise
-                    logger.warning(f"Ошибка при фиксации изменений флагов is_today: {str(e)}, повторная попытка {retry_commit}/3")
-                    time.sleep(retry_commit)
-            
-            logger.info(f"Проверены флаги is_today для всех дайджестов. Сегодня: {today}, обновлено: {updated_count}, исправлено неправильных: {wrong_flags_count}")
-            return {"updated": updated_count, "wrong_flags": wrong_flags_count}
-        except Exception as e:
-            session.rollback()
-            logger.error(f"Ошибка при обновлении флагов is_today: {str(e)}")
-            return {"error": str(e)}
-        finally:
-            session.close()
+                
+                # Фиксируем изменения
+                session.commit()
+                
+                logger.info(f"Проверены флаги is_today для всех дайджестов. "
+                        f"Сегодня: {today}, обновлено: {updated_count}, исправлено неправильных: {wrong_flags_count}")
+                return {"updated": updated_count, "wrong_flags": wrong_flags_count}
+                
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Ошибка при обновлении флагов is_today (попытка {attempt + 1}/{max_attempts}): {str(e)}")
+                
+                if attempt < max_attempts - 1:
+                    # Если не последняя попытка, ждем и пробуем снова
+                    import time
+                    time.sleep(delay * (attempt + 1))  # Увеличиваем задержку с каждой попыткой
+                    continue
+                else:
+                    # Если последняя попытка - возвращаем ошибку
+                    return {"error": str(e)}
+            finally:
+                session.close()
 
 # В файле database/db_manager.py добавим новый метод для поиска дайджестов за сегодня
 

@@ -122,7 +122,7 @@ async def view_digest_section_callback(update: Update, context: ContextTypes.DEF
     """Обработчик колбэка для просмотра секции дайджеста с короткими ID"""
     query = update.callback_query
     await query.answer()
-    
+        
     try:
         # Извлекаем информацию из callback_data
         # Формат: ds_DIGEST_ID_SHORT_CATEGORY_ID
@@ -133,9 +133,17 @@ async def view_digest_section_callback(update: Update, context: ContextTypes.DEF
         
         digest_id = int(parts[1])
         short_category_id = parts[2]
+        logger.info(f"digest_id: {digest_id}, short_category_id: {short_category_id}")
         
         # Получаем категорию из маппинга
         mapping_key = f"{digest_id}_{short_category_id}"
+        
+        logger.info(f"Ищем маппинг для ключа: '{mapping_key}'")
+        if context.user_data.get("category_mapping"):
+            logger.info(f"Доступные ключи в category_mapping: {list(context.user_data['category_mapping'].keys())}")
+        else:
+            logger.error("category_mapping вообще отсутствует!")
+
         if not context.user_data.get("category_mapping") or mapping_key not in context.user_data["category_mapping"]:
             await query.message.reply_text(
                 "❌ Информация о категории не найдена. Пожалуйста, начните просмотр заново."
@@ -144,6 +152,11 @@ async def view_digest_section_callback(update: Update, context: ContextTypes.DEF
         
         category = context.user_data["category_mapping"][mapping_key]
         
+        if mapping_key not in context.user_data["category_mapping"]:
+            logger.error(f"Ключ '{mapping_key}' НЕ НАЙДЕН в category_mapping!")
+            logger.error(f"Возможно, show_digest_categories была вызвана без context")
+        else:
+            logger.info(f"Ключ '{mapping_key}' найден, категория: '{context.user_data['category_mapping'][mapping_key]}'")
         # Получаем дайджест с секциями
         digest = db_manager.get_digest_by_id_with_sections(digest_id)
         

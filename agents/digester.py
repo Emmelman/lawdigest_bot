@@ -621,6 +621,18 @@ class DigesterAgent:
         today = datetime.now().date()
         is_today_digest = end_date.date() == today
 
+        if is_today_digest:
+            logger.info("Создается дайджест за сегодня - обновляем флаги is_today")
+            try:
+                # Вызываем обновление флагов ПЕРЕД созданием нового дайджеста
+                update_result = self.db_manager.update_today_flags()
+                if "error" in update_result:
+                    logger.warning(f"Ошибка при обновлении флагов is_today: {update_result['error']}")
+                else:
+                    logger.info(f"Флаги is_today обновлены: сброшено={update_result.get('updated', 0)} старых флагов")
+            except Exception as e:
+                logger.warning(f"Не удалось обновить флаги is_today перед созданием дайджеста: {str(e)}")
+
         # Хранилище для ID существующих дайджестов по типам
         digests_by_type = {}
 
