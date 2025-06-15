@@ -43,6 +43,40 @@ from agents.critic import CriticAgent
 # Настройка логирования
 logger = setup_logging()
 
+def enable_detailed_reasoning_logs():
+    """Включает детальное логирование reasoning для агентов"""
+    
+    # Устанавливаем уровень логирования для агентов
+    logging.getLogger('agents.analyzer').setLevel(logging.INFO)
+    logging.getLogger('agents.critic').setLevel(logging.INFO)
+    
+    # Создаем специальный форматтер для reasoning логов
+    reasoning_formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%H:%M:%S'
+    )
+    
+    # Получаем логгеры агентов
+    analyzer_logger = logging.getLogger('agents.analyzer')
+    critic_logger = logging.getLogger('agents.critic')
+    
+    # Проверяем, есть ли уже handlers (чтобы не дублировать)
+    if not analyzer_logger.handlers:
+        analyzer_handler = logging.StreamHandler()
+        analyzer_handler.setFormatter(reasoning_formatter)
+        analyzer_logger.addHandler(analyzer_handler)
+    
+    if not critic_logger.handlers:
+        critic_handler = logging.StreamHandler()
+        critic_handler.setFormatter(reasoning_formatter)
+        critic_logger.addHandler(critic_handler)
+    
+    # Отключаем propagation чтобы избежать дублирования логов
+    analyzer_logger.propagate = False
+    critic_logger.propagate = False
+    
+    print("🧠 Детальное логирование reasoning ВКЛЮЧЕНО")
+
 def run_scheduler(scheduler):
     """Запуск планировщика в отдельном потоке"""
     scheduler.start()
@@ -171,7 +205,12 @@ async def run_categorization_review(db_manager, llm_model):
     
     try:
         critic = CriticAgent(db_manager, llm_model)
-        results = critic.review_categorization()
+        results = critic.review_recent_categorizations(
+            confidence_threshold=3,  # Проверяем сообщения с уверенностью <= 3
+            limit=50,               # Максимум 50 сообщений
+            batch_size=5,           # По 5 в пакете
+            max_workers=3
+        )
         logger.info(f"Проверка категоризации завершена. Обновлено: {results.get('updated', 0)}, "
                    f"всего: {results.get('total', 0)}")
         return results
@@ -481,11 +520,17 @@ def parse_arguments():
 def main():
     """Точка входа в приложение"""
     args = parse_arguments()
+    enable_detailed_reasoning_logs()
     
+    # Дополнительное логирование если включен verbose или debug
     # Настройка уровня логирования
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
+        logging.getLogger('agents.analyzer').setLevel(logging.DEBUG)
+        logging.getLogger('agents.critic').setLevel(logging.DEBUG)
+        logging.getLogger('agents.orchestrator').setLevel(logging.DEBUG)
         logger.debug("Режим отладки включен")
+        print("🔍 Включен debug режим с детальными логами")
     
     logger.info(f"Запуск приложения в режиме: {args.mode}")
     logger.info(f"LawDigest Bot v2.0 с поддержкой intelligent оркестратора")

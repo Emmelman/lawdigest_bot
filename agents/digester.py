@@ -3,6 +3,7 @@
 """
 import logging
 import re
+import json
 from datetime import datetime, time, timedelta
 from crewai import Agent, Task
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1021,9 +1022,21 @@ class DigesterAgent:
             digest_date = digest["date"]
             digest_type = digest["digest_type"]
             focus_category = digest["focus_category"]
-            channels = digest["channels_filter"]
-            keywords = digest["keywords_filter"]
+            channels = digest.get["channels_filter"]
+            keywords = digest.get["keywords_filter"]
+            # Проверяем и парсим JSON, если нужно
+            if isinstance(channels, str):
+                try:
+                    channels = json.loads(channels) if channels else None
+                except (json.JSONDecodeError, TypeError):
+                    channels = None
             
+            if isinstance(keywords, str):
+                try:
+                    keywords = json.loads(keywords) if keywords else None
+                except (json.JSONDecodeError, TypeError):
+                    keywords = None
+
             # Определяем период для обновления
             if digest["date_range_start"] and digest["date_range_end"]:
                 start_date = digest["date_range_start"]

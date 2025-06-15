@@ -796,23 +796,6 @@ class DataCollectorAgent:
             logger.error(f"Ошибка при получении новых сообщений: {str(e)}")
             return []
 
-    def _save_messages_one_by_one(self, messages_to_save, channel):
-        """Вспомогательный метод для сохранения сообщений по одному"""
-        saved_count = 0
-        for msg_data in messages_to_save:
-            try:
-                self.db_manager.save_message(
-                    channel=msg_data['channel'],
-                    message_id=msg_data['message_id'],
-                    text=msg_data['text'],
-                    date=msg_data['date']
-                )
-                saved_count += 1
-            except Exception as e:
-                logger.error(f"Ошибка при сохранении сообщения {msg_data['message_id']} из канала {channel}: {str(e)}")
-        
-        return saved_count
-
     async def after_collect_hook(self, collect_result):
         """
         Асинхронный хук, вызываемый после успешного сбора данных

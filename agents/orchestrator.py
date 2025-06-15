@@ -67,7 +67,6 @@ class TaskResult:
     error: str = None
     execution_time: float = 0.0
     completed_at: datetime = None
-
 class OrchestratorAgent:
     """
     Оригинальный агент-оркестратор для обратной совместимости
