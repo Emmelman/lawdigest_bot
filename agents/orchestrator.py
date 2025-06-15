@@ -165,7 +165,10 @@ class OrchestratorAgent:
         tasks.append(TaskRequest(
             task_type=TaskType.DATA_COLLECTION,
             priority=TaskPriority.HIGH,
-            params={"days_back": kwargs.get("days_back", 1)}
+            params={"days_back": kwargs.get("days_back", 1),
+                    "force_update": True
+                    },
+        reasoning="Необходим сбор свежих данных из Telegram каналов"
         ))
         
         tasks.append(TaskRequest(
@@ -555,13 +558,25 @@ class IntelligentOrchestratorAgent:
         
         # Простой анализ ответа LLM
         response_lower = llm_response.lower()
-        
+        from datetime import datetime, timedelta
+
+        # Рассчитываем правильные даты
+        days_back = kwargs.get("days_back", 1)
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days_back-1)
+        start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+
         # Определяем нужные задачи на основе ответа LLM и логики
         if "data_collection" in response_lower or context.get('needs_data_collection', True):
             tasks.append(TaskRequest(
                 task_type=TaskType.DATA_COLLECTION,
                 priority=TaskPriority.HIGH,
-                params={"days_back": kwargs.get("days_back", 1)},
+                params={
+                    "days_back": kwargs.get("days_back", 1),
+                    "force_update": True,
+                    "start_date": start_date,
+                    "end_date": end_date
+                    },
                 reasoning="LLM: Необходим сбор данных"
             ))
             dependencies.append("data_collection")
@@ -580,7 +595,7 @@ class IntelligentOrchestratorAgent:
             tasks.append(TaskRequest(
                 task_type=TaskType.CATEGORIZATION_REVIEW,
                 priority=TaskPriority.NORMAL,
-                params={"confidence_threshold": 2},
+                params={"confidence_threshold": 3},
                 dependencies=dependencies.copy(),
                 reasoning="LLM: Проверка категоризации"
             ))
@@ -590,7 +605,9 @@ class IntelligentOrchestratorAgent:
             tasks.append(TaskRequest(
                 task_type=TaskType.DIGEST_CREATION,
                 priority=TaskPriority.HIGH,
-                params={"days_back": kwargs.get("days_back", 1)},
+                params={
+                    "days_back": kwargs.get("days_back", 1)
+                    },
                 dependencies=dependencies.copy(),
                 reasoning="LLM: Создание дайджестов"
             ))
@@ -613,12 +630,22 @@ class IntelligentOrchestratorAgent:
             context.get('needs_data_collection', True) or
             context.get('unanalyzed_count', 0) == 0):
             
+            from datetime import datetime, timedelta
+
+            # Рассчитываем правильные даты
+            days_back = kwargs.get("days_back", 1)
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=days_back-1)
+            start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+
             tasks.append(TaskRequest(
                 task_type=TaskType.DATA_COLLECTION,
                 priority=TaskPriority.HIGH,
                 params={
                     "days_back": kwargs.get("days_back", 1),
-                    "force_update": kwargs.get("force_update", False)
+                    "force_update": True,
+                    "start_date": start_date, 
+                    "end_date": end_date 
                 },
                 reasoning="Необходим сбор свежих данных из Telegram каналов"
             ))
@@ -651,7 +678,7 @@ class IntelligentOrchestratorAgent:
                 task_type=TaskType.CATEGORIZATION_REVIEW,
                 priority=TaskPriority.NORMAL,
                 params={
-                    "confidence_threshold": 2,
+                    "confidence_threshold": 3,
                     "limit": min(context.get('low_confidence_count', 50), 100)
                 },
                 dependencies=dependencies.copy(),
@@ -707,7 +734,9 @@ class IntelligentOrchestratorAgent:
             tasks.append(TaskRequest(
                 task_type=TaskType.DATA_COLLECTION,
                 priority=TaskPriority.HIGH,
-                params={"days_back": kwargs.get("days_back", 1)},
+                params={"days_back": kwargs.get("days_back", 1),
+                        "force_update": True
+                        },
                 reasoning="Fallback: сбор данных для daily_workflow"
             ))
             dependencies.append("data_collection")
@@ -838,7 +867,7 @@ class IntelligentOrchestratorAgent:
             
         elif task.task_type == TaskType.CATEGORIZATION_REVIEW:
             critic = self.agent_registry.get_agent("critic")
-            return await critic.review_categorization(**task.params)
+            return critic.review_recent_categorizations(**task.params)
             
         elif task.task_type == TaskType.DIGEST_CREATION:
             digester = self.agent_registry.get_agent("digester")

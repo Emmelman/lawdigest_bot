@@ -130,7 +130,7 @@ class AgentRegistry:
                 required_methods = {
                     AgentType.DATA_COLLECTOR: ['collect_data'],
                     AgentType.ANALYZER: ['analyze_messages'],
-                    AgentType.CRITIC: ['review_categorization'],
+                    AgentType.CRITIC: ['review_recent_categorizations'],
                     AgentType.DIGESTER: ['create_digest']  # Убрали update_digest, только create_digest
                 }
                 
